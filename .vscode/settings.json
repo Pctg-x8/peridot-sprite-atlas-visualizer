@@ -1,0 +1,4 @@
+{
+    "editor.formatOnSave": true,
+    "rust-analyzer.cargo.extraArgs": ["--target-dir", ".target-ra"]
+}
