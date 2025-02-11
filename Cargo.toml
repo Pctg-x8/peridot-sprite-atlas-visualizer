@@ -6,11 +6,13 @@ build = "build.rs"
 
 [dependencies]
 bitflags = "2.8.0"
+windows-core = "0.59"
 
 [dependencies.windows]
 version = "0.59"
 features = [
     "Win32_Storage_Packaging_Appx",
+    "Win32_Graphics_CompositionSwapchain",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
@@ -20,19 +22,27 @@ features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Foundation_Collections",
     "Foundation_Numerics",
     "System",
+    "Graphics_Effects",
     "Graphics_DirectX",
+    "UI",
     "UI_Composition",
     "UI_Composition_Desktop",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",
 ]
+
+[build-dependencies]
+windows-bindgen = "0.59"
 
 [build-dependencies.windows]
 version = "0.59"

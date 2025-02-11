@@ -19,6 +19,7 @@ fn main() {
     let target_exe_dir = project_root.join("target").join(&build_profile);
     let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("no out_dir set?"));
     let appsdk_root = project_root.join(".nuget/Microsoft.WindowsAppSDK.1.6.250108002");
+    let win2d_root = project_root.join(".nuget/Microsoft.Graphics.Win2D.1.3.2");
 
     // build rc
     let (win10_sdk_installation_folder, win10_sdk_product_version) = find_win10_sdk();
@@ -54,9 +55,55 @@ fn main() {
     // https://github.com/rust-lang/rust/issues/81488
     println!("cargo:rustc-link-lib=dylib:+verbatim=exe.res");
 
+    // extra codegen for winrt apis
+    let out_path = project_root.join("src/extra_bindings.rs");
+    let microsoft_graphics_canvas_winmd_path = project_root
+        .join(".nuget/Microsoft.Graphics.Win2D.1.3.2/lib/uap10.0/Microsoft.Graphics.Canvas.winmd");
+    windows_bindgen::bindgen([
+        "--out",
+        out_path.to_str().unwrap(),
+        "--reference",
+        "windows,skip-root,Windows.Graphics.Effects.IGraphicsEffect",
+        "--reference",
+        "windows,skip-root,Windows.UI.Color",
+        "--reference",
+        "windows,skip-root,Windows.Foundation.Collections.IVector",
+        "--in",
+        "default",
+        "--in",
+        microsoft_graphics_canvas_winmd_path.to_str().unwrap(),
+        "--filter",
+        "Microsoft.Graphics.Canvas.Effects.GaussianBlurEffect",
+        "--filter",
+        "Microsoft.Graphics.Canvas.Effects.ColorSourceEffect",
+        "--filter",
+        "Microsoft.Graphics.Canvas.Effects.CompositeEffect",
+        "--filter",
+        "Microsoft.Graphics.Canvas.CanvasComposite",
+    ]);
+
+    // ICanvasImage::GetBoundsの定義が何故か二重に出るのでパッチ当てる
+    let generated = std::fs::read_to_string(&out_path).unwrap();
+    let generated = generated.replace(
+        r#"GetBounds: 0,
+                        GetBounds: 0,"#,
+        "GetBounds: 0,",
+    );
+    let generated = generated.replace(
+        r#"GetBounds: usize,
+                GetBounds: usize,"#,
+        "GetBounds: usize,",
+    );
+    std::fs::write(&out_path, &generated).unwrap();
+
     std::fs::copy(
         appsdk_root.join("runtimes/win-x64/native/Microsoft.WindowsAppRuntime.Bootstrap.dll"),
         target_exe_dir.join("Microsoft.WindowsAppRuntime.Bootstrap.dll"),
+    )
+    .expect("Failed to copy bootstrap dll");
+    std::fs::copy(
+        win2d_root.join("runtimes/win-x64/native/Microsoft.Graphics.Canvas.dll"),
+        target_exe_dir.join("Microsoft.Graphics.Canvas.dll"),
     )
     .expect("Failed to copy bootstrap dll");
 }
