@@ -1,7 +1,5 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
-    hash::Hash,
     rc::Rc,
 };
 
@@ -10,19 +8,17 @@ use extra_bindings::Microsoft::Graphics::Canvas::{
     Effects::{ColorSourceEffect, CompositeEffect, GaussianBlurEffect},
 };
 use hittest::HitTestTreeActionHandler;
+use subsystem::Subsystem;
 use windows::{
-    core::{h, w, Interface, HRESULT, HSTRING, PCWSTR},
+    core::{h, w, Interface, HRESULT, PCWSTR},
     Foundation::{
         Numerics::{Vector2, Vector3},
         Size, TimeSpan,
     },
     Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat},
     Win32::{
-        Foundation::{BOOL, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
+        Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
         Graphics::{
-            CompositionSwapchain::{
-                CreatePresentationFactory, IPresentationFactory, IPresentationManager,
-            },
             Direct2D::{
                 CLSID_D2D1AlphaMask, CLSID_D2D1ColorMatrix, CLSID_D2D1ConvolveMatrix,
                 Common::{
@@ -31,54 +27,36 @@ use windows::{
                     D2D1_PIXEL_FORMAT, D2D_MATRIX_5X4_F, D2D_MATRIX_5X4_F_0, D2D_MATRIX_5X4_F_0_0,
                     D2D_POINT_2F, D2D_RECT_F,
                 },
-                D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-                D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1,
-                D2D1_BUFFER_PRECISION_32BPC_FLOAT, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
-                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
+                ID2D1DeviceContext, ID2D1RenderTarget, D2D1_BITMAP_OPTIONS_NONE,
+                D2D1_BITMAP_PROPERTIES1, D2D1_COLORMATRIX_PROP_COLOR_MATRIX,
                 D2D1_CONVOLVEMATRIX_PROP_BORDER_MODE, D2D1_CONVOLVEMATRIX_PROP_DIVISOR,
                 D2D1_CONVOLVEMATRIX_PROP_KERNEL_MATRIX, D2D1_CONVOLVEMATRIX_PROP_KERNEL_SIZE_X,
-                D2D1_CONVOLVEMATRIX_PROP_KERNEL_SIZE_Y, D2D1_DEBUG_LEVEL_WARNING,
-                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-                D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                D2D1_FEATURE_LEVEL_DEFAULT, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE_ENUM,
+                D2D1_CONVOLVEMATRIX_PROP_KERNEL_SIZE_Y, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+                D2D1_EXTEND_MODE_CLAMP, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_PROPERTY_TYPE_ENUM,
                 D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_UINT32,
                 D2D1_PROPERTY_TYPE_UNKNOWN, D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
                 D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_HARDWARE,
                 D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
             },
-            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP},
+            Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             Direct3D11::{
-                D3D11CreateDevice, ID3D11Buffer, ID3D11Debug, ID3D11Device, ID3D11DeviceContext,
-                ID3D11PixelShader, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER,
-                D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
-                D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                D3D11_CREATE_DEVICE_DEBUG, D3D11_MAP_WRITE, D3D11_MAP_WRITE_DISCARD,
+                ID3D11Buffer, ID3D11PixelShader, ID3D11Texture2D, ID3D11VertexShader,
+                D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+                D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE, D3D11_MAP_WRITE_DISCARD,
                 D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
-                D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
-                D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC,
-                D3D11_VIEWPORT,
-            },
-            DirectWrite::{
-                DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
-                IDWriteFontCollectionLoader, IDWriteFontCollectionLoader_Impl,
-                IDWriteFontFileEnumerator, IDWriteFontFileEnumerator_Impl, IDWriteTextFormat,
-                DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_WEIGHT_NORMAL,
+                D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV,
+                D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
             },
             Dwm::{
                 DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
             },
             Dxgi::{
-                Common::{
-                    DXGI_ALPHA_MODE_IGNORE, DXGI_ALPHA_MODE_PREMULTIPLIED,
-                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
-                },
-                IDXGIAdapter, IDXGIDevice, IDXGIDevice2, IDXGIFactory2, IDXGISurface,
-                IDXGISwapChain1, IDXGISwapChain2, DXGI_PRESENT, DXGI_PRESENT_PARAMETERS,
-                DXGI_SCALING_NONE, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-                DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                IDXGIAdapter, IDXGIDevice2, IDXGIFactory2, IDXGISurface, IDXGISwapChain2,
+                DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                DXGI_USAGE_RENDER_TARGET_OUTPUT,
             },
             Gdi::{MapWindowPoints, HBRUSH},
         },
@@ -87,25 +65,21 @@ use windows::{
             LibraryLoader::GetModuleHandleW,
             Threading::INFINITE,
             WinRT::{
-                Composition::{
-                    ICompositionDrawingSurfaceInterop, ICompositorDesktopInterop,
-                    ICompositorInterop,
-                },
-                CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_ASTA,
-                DQTYPE_THREAD_CURRENT,
+                Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
+                DispatcherQueueOptions, DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT,
             },
         },
         UI::{
             Controls::MARGINS,
             HiDpi::GetDpiForWindow,
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
-                GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, LoadCursorW, LoadIconW,
+                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetSystemMetrics,
+                GetWindowLongPtrW, GetWindowRect, LoadCursorW, LoadIconW,
                 MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
                 SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-                CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HTCAPTION, HTCLIENT, HTTOP, IDC_ARROW,
-                IDC_SIZEWE, IDI_APPLICATION, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT,
-                QS_ALLPOSTMESSAGE, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SW_SHOW,
+                CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HTCAPTION, HTCLIENT, HTCLOSE, HTMINBUTTON,
+                HTTOP, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, NCCALCSIZE_PARAMS, PM_REMOVE,
+                QS_ALLINPUT, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SWP_FRAMECHANGED, SW_SHOW,
                 WM_ACTIVATE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
                 WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT, WM_SETCURSOR, WM_SIZE,
                 WNDCLASSEXW, WNDCLASS_STYLES, WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP,
@@ -116,17 +90,17 @@ use windows::{
     UI::{
         Color,
         Composition::{
-            CompositionDrawingSurface, CompositionEffectSourceParameter, CompositionGraphicsDevice,
-            CompositionStretch, Compositor, ContainerVisual, ScalarKeyFrameAnimation, SpriteVisual,
+            CompositionDrawingSurface, CompositionEffectSourceParameter, CompositionStretch,
+            ContainerVisual, Desktop::DesktopWindowTarget, ScalarKeyFrameAnimation, SpriteVisual,
             VisualCollection,
         },
     },
 };
-use windows_core::implement;
 
 mod extra_bindings;
 mod hittest;
 mod input;
+mod subsystem;
 
 use crate::hittest::*;
 use crate::input::*;
@@ -158,6 +132,31 @@ impl SizePixels {
             Width: pixels_to_dip(self.width, dpi),
             Height: pixels_to_dip(self.height, dpi),
         }
+    }
+}
+
+pub struct PointDIP {
+    pub x: f32,
+    pub y: f32,
+}
+impl PointDIP {
+    pub const fn make_rel_from(&self, other: &Self) -> Self {
+        Self {
+            x: self.x - other.x,
+            y: self.y - other.y,
+        }
+    }
+}
+
+pub struct RectDIP {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+impl RectDIP {
+    pub const fn contains(&self, p: &PointDIP) -> bool {
+        self.left <= p.x && p.x <= self.right && self.top <= p.y && p.y <= self.bottom
     }
 }
 
@@ -237,69 +236,6 @@ const SEPARATOR_COLOR: Color = rgb_color_from_websafe_hex(0x666);
 pub trait DpiHandler {
     #[allow(unused_variables)]
     fn on_dpi_changed(&self, new_dpi: f32) {}
-}
-
-#[derive(Debug, Clone)]
-pub struct TextFormatCacheKey {
-    family_name: HSTRING,
-    size: f32,
-}
-impl PartialEq for TextFormatCacheKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.family_name.eq(&other.family_name) && self.size.to_bits().eq(&other.size.to_bits())
-    }
-}
-impl Eq for TextFormatCacheKey {}
-impl Hash for TextFormatCacheKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.family_name.hash(state);
-        self.size.to_bits().hash(state);
-    }
-}
-
-pub struct TextFormatStore {
-    factory: IDWriteFactory,
-    app_fc: IDWriteFontCollection,
-    cache: RefCell<HashMap<TextFormatCacheKey, IDWriteTextFormat>>,
-}
-impl TextFormatStore {
-    pub fn new(factory: IDWriteFactory, app_fc: IDWriteFontCollection) -> Self {
-        Self {
-            factory,
-            app_fc,
-            cache: RefCell::new(HashMap::new()),
-        }
-    }
-
-    pub fn get(
-        &self,
-        family_name: &HSTRING,
-        size: f32,
-    ) -> windows::core::Result<IDWriteTextFormat> {
-        let key = TextFormatCacheKey {
-            family_name: family_name.clone(),
-            size,
-        };
-
-        if let Some(x) = self.cache.borrow().get(&key).cloned() {
-            // ある
-            return Ok(x);
-        }
-
-        let x = unsafe {
-            self.factory.CreateTextFormat(
-                &key.family_name,
-                Some(&self.app_fc),
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                key.size,
-                w!("ja-JP"),
-            )?
-        };
-        self.cache.borrow_mut().insert(key, x.clone());
-        Ok(x)
-    }
 }
 
 pub struct PresenterInitContext<'r> {
@@ -1998,7 +1934,8 @@ pub struct AppCloseButtonView {
     root: ContainerVisual,
 }
 impl AppCloseButtonView {
-    const BUTTON_SIZE: f32 = 32.0;
+    const BUTTON_SIZE: f32 = 24.0;
+    const ICON_SIZE: f32 = 6.0;
 
     pub fn new(init: &mut ViewInitContext) -> Self {
         let icon_surface = init
@@ -2006,8 +1943,8 @@ impl AppCloseButtonView {
             .composition_2d_graphics_device
             .CreateDrawingSurface(
                 Size {
-                    Width: dip_to_pixels(10.0, init.dpi),
-                    Height: dip_to_pixels(10.0, init.dpi),
+                    Width: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+                    Height: dip_to_pixels(Self::ICON_SIZE, init.dpi),
                 },
                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 DirectXAlphaMode::Premultiplied,
@@ -2049,24 +1986,24 @@ impl AppCloseButtonView {
                             y: offset_y_dip,
                         },
                         D2D_POINT_2F {
-                            x: offset_x_dip + 10.0,
-                            y: offset_y_dip + 10.0,
+                            x: offset_x_dip + Self::ICON_SIZE,
+                            y: offset_y_dip + Self::ICON_SIZE,
                         },
                         &brush,
-                        1.0,
+                        1.5,
                         None,
                     );
                     dc.DrawLine(
                         D2D_POINT_2F {
-                            x: offset_x_dip + 10.0,
+                            x: offset_x_dip + Self::ICON_SIZE,
                             y: offset_y_dip,
                         },
                         D2D_POINT_2F {
                             x: offset_x_dip,
-                            y: offset_y_dip + 10.0,
+                            y: offset_y_dip + Self::ICON_SIZE,
                         },
                         &brush,
-                        1.0,
+                        1.5,
                         None,
                     );
                 }
@@ -2104,48 +2041,62 @@ impl AppCloseButtonView {
                     dc.SetDpi(init.dpi, init.dpi);
                 }
 
+                let offset_x_dip = signed_pixels_to_dip(offset.x, init.dpi);
+                let offset_y_dip = signed_pixels_to_dip(offset.y, init.dpi);
+
+                // Create gradient stops collection
                 let gradient_stops = match unsafe {
-                    dc.CreateGradientStopCollection(
-                        &[
-                            D2D1_GRADIENT_STOP {
-                                position: 0.0,
-                                color: D2D1_COLOR_F {
-                                    r: 1.0,
-                                    g: 1.0,
-                                    b: 1.0,
-                                    a: 1.0,
+                    dc.cast::<ID2D1RenderTarget>()
+                        .unwrap()
+                        .CreateGradientStopCollection(
+                            &[
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.0,
+                                    color: D2D1_COLOR_F {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 1.0,
+                                    },
                                 },
-                            },
-                            D2D1_GRADIENT_STOP {
-                                position: 1.0,
-                                color: D2D1_COLOR_F {
-                                    r: 1.0,
-                                    g: 1.0,
-                                    b: 1.0,
-                                    a: 0.5,
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.75,
+                                    color: D2D1_COLOR_F {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 1.0,
+                                    },
                                 },
-                            },
-                        ],
-                        D2D1_COLOR_SPACE_SRGB,
-                        D2D1_COLOR_SPACE_SRGB,
-                        D2D1_BUFFER_PRECISION_32BPC_FLOAT,
-                        D2D1_EXTEND_MODE_CLAMP,
-                        D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
-                    )
+                                D2D1_GRADIENT_STOP {
+                                    position: 1.0,
+                                    color: D2D1_COLOR_F {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 0.0,
+                                    },
+                                },
+                            ],
+                            D2D1_GAMMA_2_2,
+                            D2D1_EXTEND_MODE_CLAMP,
+                        )
                 } {
                     Ok(x) => x,
                     Err(e) => break 'drawing Err(e),
                 };
-                let brush = match unsafe {
+
+                // Create radial gradient brush
+                let gradient_brush = match unsafe {
                     dc.CreateRadialGradientBrush(
                         &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
                             center: D2D_POINT_2F {
-                                x: Self::BUTTON_SIZE * 0.5,
-                                y: Self::BUTTON_SIZE * 0.5,
+                                x: offset_x_dip + Self::BUTTON_SIZE * 0.5,
+                                y: offset_y_dip + Self::BUTTON_SIZE * 0.5,
                             },
-                            gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
                             radiusX: Self::BUTTON_SIZE * 0.5,
                             radiusY: Self::BUTTON_SIZE * 0.5,
+                            gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
                         },
                         None,
                         &gradient_stops,
@@ -2154,9 +2105,6 @@ impl AppCloseButtonView {
                     Ok(x) => x,
                     Err(e) => break 'drawing Err(e),
                 };
-
-                let offset_x_dip = signed_pixels_to_dip(offset.x, init.dpi);
-                let offset_y_dip = signed_pixels_to_dip(offset.y, init.dpi);
 
                 unsafe {
                     dc.Clear(None);
@@ -2169,7 +2117,7 @@ impl AppCloseButtonView {
                             radiusX: Self::BUTTON_SIZE * 0.5,
                             radiusY: Self::BUTTON_SIZE * 0.5,
                         },
-                        &brush,
+                        &gradient_brush,
                     );
                 }
 
@@ -2272,13 +2220,329 @@ impl AppCloseButtonView {
         )
         .unwrap();
         icon.SetSize(Vector2 {
-            X: dip_to_pixels(10.0, init.dpi),
-            Y: dip_to_pixels(10.0, init.dpi),
+            X: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+            Y: dip_to_pixels(Self::ICON_SIZE, init.dpi),
         })
         .unwrap();
         icon.SetOffset(Vector3 {
-            X: dip_to_pixels(-5.0, init.dpi),
-            Y: dip_to_pixels(-5.0, init.dpi),
+            X: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+            Y: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+            Z: 0.0,
+        })
+        .unwrap();
+        icon.SetRelativeOffsetAdjustment(Vector3 {
+            X: 0.5,
+            Y: 0.5,
+            Z: 0.0,
+        })
+        .unwrap();
+
+        let children = root.Children().unwrap();
+        children.InsertAtTop(&bg).unwrap();
+        children.InsertAtTop(&icon).unwrap();
+
+        Self { root }
+    }
+
+    pub fn mount(&self, children: &VisualCollection) {
+        children.InsertAtTop(&self.root).unwrap();
+    }
+
+    pub fn unmount(&self) {
+        self.root
+            .Parent()
+            .unwrap()
+            .Children()
+            .unwrap()
+            .Remove(&self.root)
+            .unwrap();
+    }
+}
+
+pub struct AppMinimizeButtonView {
+    root: ContainerVisual,
+}
+impl AppMinimizeButtonView {
+    const BUTTON_SIZE: f32 = 20.0;
+    const ICON_SIZE: f32 = 6.0;
+
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let icon_surface = init
+            .subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+                    Height: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        {
+            let interop = icon_surface
+                .cast::<ICompositionDrawingSurfaceInterop>()
+                .unwrap();
+            let mut offset = core::mem::MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                let brush = match unsafe {
+                    dc.CreateSolidColorBrush(
+                        &D2D1_COLOR_F {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        },
+                        None,
+                    )
+                } {
+                    Ok(x) => x,
+                    Err(e) => break 'drawing Err(e),
+                };
+
+                let offset_x_dip = signed_pixels_to_dip(offset.x, init.dpi);
+                let offset_y_dip = signed_pixels_to_dip(offset.y, init.dpi);
+
+                unsafe {
+                    dc.SetDpi(init.dpi, init.dpi);
+                    dc.Clear(None);
+                    dc.DrawLine(
+                        D2D_POINT_2F {
+                            x: offset_x_dip,
+                            y: offset_y_dip + Self::ICON_SIZE - 0.5,
+                        },
+                        D2D_POINT_2F {
+                            x: offset_x_dip + Self::ICON_SIZE,
+                            y: offset_y_dip + Self::ICON_SIZE - 0.5,
+                        },
+                        &brush,
+                        1.5,
+                        None,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
+
+        let circle_mask_surface = init
+            .subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+                    Height: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        {
+            let interop = circle_mask_surface
+                .cast::<ICompositionDrawingSurfaceInterop>()
+                .unwrap();
+            let mut offset = core::mem::MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                unsafe {
+                    dc.SetDpi(init.dpi, init.dpi);
+                }
+
+                let offset_x_dip = signed_pixels_to_dip(offset.x, init.dpi);
+                let offset_y_dip = signed_pixels_to_dip(offset.y, init.dpi);
+
+                // Create gradient stops collection
+                let gradient_stops = match unsafe {
+                    dc.cast::<ID2D1RenderTarget>()
+                        .unwrap()
+                        .CreateGradientStopCollection(
+                            &[
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.0,
+                                    color: D2D1_COLOR_F {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 1.0,
+                                    },
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.75,
+                                    color: D2D1_COLOR_F {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 1.0,
+                                    },
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 1.0,
+                                    color: D2D1_COLOR_F {
+                                        r: 1.0,
+                                        g: 1.0,
+                                        b: 1.0,
+                                        a: 0.0,
+                                    },
+                                },
+                            ],
+                            D2D1_GAMMA_2_2,
+                            D2D1_EXTEND_MODE_CLAMP,
+                        )
+                } {
+                    Ok(x) => x,
+                    Err(e) => break 'drawing Err(e),
+                };
+
+                // Create radial gradient brush
+                let gradient_brush = match unsafe {
+                    dc.CreateRadialGradientBrush(
+                        &D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES {
+                            center: D2D_POINT_2F {
+                                x: offset_x_dip + Self::BUTTON_SIZE * 0.5,
+                                y: offset_y_dip + Self::BUTTON_SIZE * 0.5,
+                            },
+                            radiusX: Self::BUTTON_SIZE * 0.5,
+                            radiusY: Self::BUTTON_SIZE * 0.5,
+                            gradientOriginOffset: D2D_POINT_2F { x: 0.0, y: 0.0 },
+                        },
+                        None,
+                        &gradient_stops,
+                    )
+                } {
+                    Ok(x) => x,
+                    Err(e) => break 'drawing Err(e),
+                };
+
+                unsafe {
+                    dc.Clear(None);
+                    dc.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: D2D_POINT_2F {
+                                x: offset_x_dip + Self::BUTTON_SIZE * 0.5,
+                                y: offset_y_dip + Self::BUTTON_SIZE * 0.5,
+                            },
+                            radiusX: Self::BUTTON_SIZE * 0.5,
+                            radiusY: Self::BUTTON_SIZE * 0.5,
+                        },
+                        &gradient_brush,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
+
+        let root = init.subsystem.compositor.CreateContainerVisual().unwrap();
+        root.SetSize(Vector2 {
+            X: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+            Y: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+        })
+        .unwrap();
+
+        let blur_effect = GaussianBlurEffect::new().unwrap();
+        blur_effect.SetBlurAmount(9.0 / 3.0).unwrap();
+        blur_effect
+            .SetSource(&CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap())
+            .unwrap();
+        let blur_effect_factory = init
+            .subsystem
+            .compositor
+            .CreateEffectFactory(&blur_effect)
+            .unwrap();
+        let color_source_effect = ColorSourceEffect::new().unwrap();
+        color_source_effect
+            .SetColor(windows::UI::Color {
+                A: 128,
+                R: 255,
+                G: 255,
+                B: 255,
+            })
+            .unwrap();
+        let color_source_effect_factory = init
+            .subsystem
+            .compositor
+            .CreateEffectFactory(&color_source_effect)
+            .unwrap();
+        let composite_effect = CompositeEffect::new().unwrap();
+        composite_effect
+            .SetMode(CanvasComposite::SourceOver)
+            .unwrap();
+        composite_effect
+            .Sources()
+            .unwrap()
+            .Append(&CompositionEffectSourceParameter::Create(h!("backdrop_effected")).unwrap())
+            .unwrap();
+        composite_effect
+            .Sources()
+            .unwrap()
+            .Append(&CompositionEffectSourceParameter::Create(h!("over_color")).unwrap())
+            .unwrap();
+        let composite_effect_factory = init
+            .subsystem
+            .compositor
+            .CreateEffectFactory(&composite_effect)
+            .unwrap();
+
+        let backdrop_brush = init.subsystem.compositor.CreateBackdropBrush().unwrap();
+        let blur_brush = blur_effect_factory.CreateBrush().unwrap();
+        let effect_over_color_brush = color_source_effect_factory.CreateBrush().unwrap();
+        let bg_brush = composite_effect_factory.CreateBrush().unwrap();
+        blur_brush
+            .SetSourceParameter(h!("backdrop"), &backdrop_brush)
+            .unwrap();
+        bg_brush
+            .SetSourceParameter(h!("backdrop_effected"), &blur_brush)
+            .unwrap();
+        bg_brush
+            .SetSourceParameter(h!("over_color"), &effect_over_color_brush)
+            .unwrap();
+
+        let bg_masked_brush = init.subsystem.compositor.CreateMaskBrush().unwrap();
+        bg_masked_brush.SetSource(&bg_brush).unwrap();
+        bg_masked_brush
+            .SetMask(
+                &init
+                    .subsystem
+                    .compositor
+                    .CreateSurfaceBrushWithSurface(&circle_mask_surface)
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let bg = init.subsystem.compositor.CreateSpriteVisual().unwrap();
+        bg.SetBrush(&bg_masked_brush).unwrap();
+        bg.SetRelativeSizeAdjustment(Vector2::one()).unwrap();
+
+        let icon = init.subsystem.compositor.CreateSpriteVisual().unwrap();
+        icon.SetBrush(
+            &init
+                .subsystem
+                .compositor
+                .CreateSurfaceBrushWithSurface(&icon_surface)
+                .unwrap(),
+        )
+        .unwrap();
+        icon.SetSize(Vector2 {
+            X: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+            Y: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+        })
+        .unwrap();
+        icon.SetOffset(Vector3 {
+            X: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+            Y: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
             Z: 0.0,
         })
         .unwrap();
@@ -2314,7 +2578,10 @@ impl AppCloseButtonView {
 pub struct AppHeaderView {
     root: ContainerVisual,
     close_button_view: AppCloseButtonView,
+    minimize_button_view: AppMinimizeButtonView,
     height: f32,
+    close_button_rect_rel: RectDIP,
+    minimize_button_rect_rel: RectDIP,
 }
 impl AppHeaderView {
     pub fn new(init: &mut ViewInitContext, init_label: &str) -> Self {
@@ -2480,13 +2747,14 @@ impl AppHeaderView {
         children.InsertAtTop(&bg).unwrap();
         children.InsertAtTop(&label).unwrap();
 
+        let spc = (height - AppCloseButtonView::BUTTON_SIZE) * 0.5;
         let close_button_view = AppCloseButtonView::new(init);
         close_button_view.mount(&children);
         close_button_view
             .root
             .SetOffset(Vector3 {
-                X: dip_to_pixels(-AppCloseButtonView::BUTTON_SIZE - 8.0, init.dpi),
-                Y: dip_to_pixels(8.0, init.dpi),
+                X: dip_to_pixels(-spc - AppCloseButtonView::BUTTON_SIZE, init.dpi),
+                Y: dip_to_pixels(spc, init.dpi),
                 Z: 0.0,
             })
             .unwrap();
@@ -2498,10 +2766,47 @@ impl AppHeaderView {
                 Z: 0.0,
             })
             .unwrap();
+        let close_button_rect_rel = RectDIP {
+            left: -spc - AppCloseButtonView::BUTTON_SIZE,
+            top: spc,
+            right: -spc,
+            bottom: spc + AppCloseButtonView::BUTTON_SIZE,
+        };
+
+        let minimize_button_view = AppMinimizeButtonView::new(init);
+        minimize_button_view.mount(&children);
+        minimize_button_view
+            .root
+            .SetOffset(Vector3 {
+                X: dip_to_pixels(
+                    close_button_rect_rel.left - (6.0 + AppMinimizeButtonView::BUTTON_SIZE),
+                    init.dpi,
+                ),
+                Y: dip_to_pixels(spc, init.dpi),
+                Z: 0.0,
+            })
+            .unwrap();
+        minimize_button_view
+            .root
+            .SetRelativeOffsetAdjustment(Vector3 {
+                X: 1.0,
+                Y: 0.0,
+                Z: 0.0,
+            })
+            .unwrap();
+        let minimize_button_rect_rel = RectDIP {
+            left: close_button_rect_rel.left - 6.0 - AppMinimizeButtonView::BUTTON_SIZE,
+            top: spc,
+            right: close_button_rect_rel.left - 6.0,
+            bottom: spc + AppMinimizeButtonView::BUTTON_SIZE,
+        };
 
         Self {
             root,
             close_button_view,
+            close_button_rect_rel,
+            minimize_button_view,
+            minimize_button_rect_rel,
             height,
         }
     }
@@ -2519,20 +2824,43 @@ impl AppHeaderView {
             .Remove(&self.root)
             .unwrap();
     }
+
+    pub fn nc_hittest(&self, p: &PointDIP, client_size: &Size) -> Option<u32> {
+        let rel_p = p.make_rel_from(&PointDIP {
+            x: client_size.Width,
+            y: 0.0,
+        });
+
+        if self.close_button_rect_rel.contains(&rel_p) {
+            return Some(HTCLOSE);
+        }
+
+        if self.minimize_button_rect_rel.contains(&rel_p) {
+            return Some(HTMINBUTTON);
+        }
+
+        if p.y < self.height {
+            return Some(HTCAPTION);
+        }
+
+        None
+    }
 }
 
-struct AppWindowData {
-    header_height: f32,
+struct AppWindowStateModel {
     ht: HitTestTreeContext,
     ht_root: HitTestTreeRef,
     client_size_pixels: SizePixels,
     dpi: f32,
     dpi_handlers: Vec<std::rc::Weak<dyn DpiHandler>>,
     pointer_input_manager: PointerInputManager,
-    grid_view: std::rc::Weak<AtlasBaseGridView>,
+    composition_target: DesktopWindowTarget,
+    composition_root: ContainerVisual,
+    header_view: AppHeaderView,
+    grid_view: AtlasBaseGridView,
 }
-impl AppWindowData {
-    pub fn new(init_client_size_pixels: SizePixels, init_dpi: f32) -> Self {
+impl AppWindowStateModel {
+    pub fn new(subsystem: &Subsystem, bound_hwnd: HWND) -> Self {
         let mut ht = HitTestTreeContext::new();
         let ht_root = ht.alloc(HitTestTreeData {
             left: 0.0,
@@ -2547,179 +2875,200 @@ impl AppWindowData {
             children: vec![],
             action_handler: None,
         });
-
-        println!("init dpi: {init_dpi}");
-
-        Self {
-            header_height: 0.0,
-            ht,
-            ht_root,
-            client_size_pixels: init_client_size_pixels,
-            dpi: init_dpi,
-            dpi_handlers: Vec::new(),
-            pointer_input_manager: PointerInputManager::new(),
-            grid_view: std::rc::Weak::new(),
-        }
-    }
-}
-
-#[implement(IDWriteFontCollectionLoader)]
-struct AppFontCollectionLoader;
-impl IDWriteFontCollectionLoader_Impl for AppFontCollectionLoader_Impl {
-    fn CreateEnumeratorFromKey(
-        &self,
-        factory: windows::core::Ref<'_, IDWriteFactory>,
-        collectionkey: *const core::ffi::c_void,
-        collectionkeysize: u32,
-    ) -> windows::core::Result<IDWriteFontFileEnumerator> {
-        Ok(AppFontFileEnumerator {
-            factory: factory.unwrap().clone(),
-            ptr: Cell::new(0),
-        }
-        .into())
-    }
-}
-
-#[implement(IDWriteFontFileEnumerator)]
-struct AppFontFileEnumerator {
-    factory: IDWriteFactory,
-    ptr: Cell<usize>,
-}
-impl IDWriteFontFileEnumerator_Impl for AppFontFileEnumerator_Impl {
-    fn GetCurrentFontFile(
-        &self,
-    ) -> windows_core::Result<windows::Win32::Graphics::DirectWrite::IDWriteFontFile> {
+        let mut client_size_pixels = core::mem::MaybeUninit::uninit();
         unsafe {
-            self.factory
-                .CreateFontFileReference(w!("./resources/inter.ttc"), None)
+            GetClientRect(bound_hwnd, client_size_pixels.as_mut_ptr()).unwrap();
         }
-    }
+        let client_size_pixels = unsafe { client_size_pixels.assume_init_ref() };
+        let client_size_pixels = SizePixels {
+            width: (client_size_pixels.right - client_size_pixels.left)
+                .try_into()
+                .expect("negative size?"),
+            height: (client_size_pixels.bottom - client_size_pixels.top)
+                .try_into()
+                .expect("negative size?"),
+        };
+        let dpi = unsafe { GetDpiForWindow(bound_hwnd) as f32 };
+        println!("init dpi: {dpi}");
+        let dpi_handlers = Vec::new();
+        let pointer_input_manager = PointerInputManager::new();
 
-    fn MoveNext(&self) -> windows_core::Result<BOOL> {
-        self.ptr.set(self.ptr.get() + 1);
-        Ok(BOOL(if self.ptr.get() <= 1 { 1 } else { 0 }))
-    }
-}
-
-pub struct Subsystem {
-    d3d11_device: ID3D11Device,
-    d3d11_imm_context: ID3D11DeviceContext,
-    d2d1_device: ID2D1Device,
-    dwrite_factory: IDWriteFactory,
-    text_format_store: TextFormatStore,
-    default_ui_format: IDWriteTextFormat,
-    compositor: Compositor,
-    compositor_interop: ICompositorInterop,
-    compositor_desktop_interop: ICompositorDesktopInterop,
-    composition_2d_graphics_device: CompositionGraphicsDevice,
-    presentation_factory: IPresentationFactory,
-    presentation_manager: IPresentationManager,
-}
-impl Subsystem {
-    pub fn new() -> Self {
-        let mut d3d11_device = core::mem::MaybeUninit::uninit();
-        let mut feature_level = core::mem::MaybeUninit::uninit();
-        let mut d3d11_imm_context = core::mem::MaybeUninit::uninit();
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE(core::ptr::null_mut()),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG,
-                None,
-                D3D11_SDK_VERSION,
-                Some(d3d11_device.as_mut_ptr()),
-                Some(feature_level.as_mut_ptr()),
-                Some(d3d11_imm_context.as_mut_ptr()),
-            )
-            .expect("Failed to create D3D11 Device");
-        }
-        let d3d11_device = unsafe {
-            d3d11_device
-                .assume_init()
-                .expect("no d3d11 device provided?")
-        };
-        let feature_level = unsafe { feature_level.assume_init() };
-        let d3d11_imm_context = unsafe {
-            d3d11_imm_context
-                .assume_init()
-                .expect("no d3d11 imm context provided?")
-        };
-        println!("d3d11 feature level = {feature_level:?}");
-
-        let d2d1_factory: ID2D1Factory1 = unsafe {
-            D2D1CreateFactory(
-                D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                Some(&D2D1_FACTORY_OPTIONS {
-                    debugLevel: D2D1_DEBUG_LEVEL_WARNING,
-                }),
-            )
-            .expect("Failed to create d2d1 factory")
-        };
-        let d2d1_device = unsafe {
-            d2d1_factory
-                .CreateDevice(&d3d11_device.cast::<IDXGIDevice>().expect("no dxgi device?"))
-                .expect("Failed to create d2d1 device")
-        };
-
-        let dwrite_factory: IDWriteFactory = unsafe {
-            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
-                .expect("Failed to create dwrite factory")
-        };
-        let app_fc_loader: IDWriteFontCollectionLoader = AppFontCollectionLoader.into();
-        unsafe {
-            dwrite_factory
-                .RegisterFontCollectionLoader(&app_fc_loader)
-                .unwrap();
-        }
-        let key = 0u32;
-        let app_font_collection = unsafe {
-            dwrite_factory
-                .CreateCustomFontCollection(
-                    &app_fc_loader,
-                    &key as *const _ as _,
-                    core::mem::size_of_val(&key) as _,
-                )
+        let composition_target = unsafe {
+            subsystem
+                .compositor_desktop_interop
+                .CreateDesktopWindowTarget(bound_hwnd, true)
                 .unwrap()
         };
-        let text_format_store = TextFormatStore::new(dwrite_factory.clone(), app_font_collection);
-        let default_ui_format = text_format_store.get(h!("Inter Display"), 12.0).unwrap();
 
-        let compositor = Compositor::new().expect("Failed to create ui compositor");
-        let compositor_interop = compositor
-            .cast::<ICompositorInterop>()
-            .expect("no compositor interop support");
-        let compositor_desktop_interop = compositor
-            .cast::<ICompositorDesktopInterop>()
-            .expect("no compositor desktop interop");
-        let composition_2d_graphics_device = unsafe {
-            compositor_interop
-                .CreateGraphicsDevice(&d2d1_device)
-                .expect("Failed to create composition 2d graphics device")
+        let composition_root = subsystem.compositor.CreateContainerVisual().unwrap();
+        composition_root
+            .SetRelativeSizeAdjustment(Vector2::one())
+            .unwrap();
+        composition_target.SetRoot(&composition_root).unwrap();
+
+        let bg = subsystem
+            .compositor
+            .CreateSpriteVisual()
+            .expect("Failed to create bg visual");
+        bg.SetBrush(
+            &subsystem
+                .compositor
+                .CreateColorBrushWithColor(BG_COLOR)
+                .expect("Failed to create bg brush"),
+        )
+        .expect("Failed to set bg brush");
+        bg.SetRelativeSizeAdjustment(Vector2::one())
+            .expect("Failed to set bg size");
+        composition_root
+            .Children()
+            .expect("Failed to get children")
+            .InsertAtBottom(&bg)
+            .expect("Failed to insert bg");
+
+        let mut view_init_context = ViewInitContext {
+            subsystem,
+            ht: &mut ht,
+            dpi,
         };
 
-        let presentation_factory: IPresentationFactory =
-            unsafe { CreatePresentationFactory(&d3d11_device).unwrap() };
-        if unsafe { presentation_factory.IsPresentationSupportedWithIndependentFlip() == 0 } {
-            unimplemented!("Presentation with independent flip is not supported on this machine");
-        }
-        let presentation_manager =
-            unsafe { presentation_factory.CreatePresentationManager().unwrap() };
+        let grid_view = AtlasBaseGridView::new(&mut view_init_context, 128, 128);
+        grid_view.mount(&composition_root.Children().unwrap());
+        grid_view.resize(client_size_pixels.width, client_size_pixels.height);
+
+        let header_view = AppHeaderView::new(
+            &mut view_init_context,
+            "Peridot SpriteAtlas Visualizer/Editor",
+        );
+        header_view.mount(&composition_root.Children().unwrap());
+
+        ht.dump(ht_root);
 
         Self {
-            d3d11_device,
-            d3d11_imm_context,
-            d2d1_device,
-            dwrite_factory,
-            text_format_store,
-            default_ui_format,
-            compositor,
-            compositor_interop,
-            compositor_desktop_interop,
-            composition_2d_graphics_device,
-            presentation_factory,
-            presentation_manager,
+            ht,
+            ht_root,
+            client_size_pixels,
+            dpi,
+            dpi_handlers,
+            pointer_input_manager,
+            composition_target,
+            composition_root,
+            header_view,
+            grid_view,
         }
+    }
+
+    pub fn client_size_dip(&self) -> Size {
+        self.client_size_pixels.to_dip(self.dpi)
+    }
+
+    pub fn nc_hittest(&self, hwnd: HWND, _wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        let resize_h = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) };
+
+        let (x, y) = (
+            (lparam.0 & 0xffff) as i16 as i32,
+            ((lparam.0 >> 16) & 0xffff) as i16 as i32,
+        );
+        let mut p = [POINT { x, y }];
+        unsafe {
+            MapWindowPoints(None, Some(hwnd), &mut p);
+        }
+        let [POINT { x, y }] = p;
+
+        if 0 > x
+            || x > self.client_size_pixels.width as i32
+            || 0 > y
+            || y > self.client_size_pixels.height as i32
+        {
+            // ウィンドウ範囲外はシステムにおまかせ
+            return None;
+        }
+
+        if y < resize_h {
+            // global override
+            return Some(LRESULT(HTTOP as _));
+        }
+
+        let p = PointDIP {
+            x: signed_pixels_to_dip(x, self.dpi),
+            y: signed_pixels_to_dip(y, self.dpi),
+        };
+        let size = self.client_size_dip();
+
+        if let Some(ht) = self.header_view.nc_hittest(&p, &size) {
+            return Some(LRESULT(ht as _));
+        }
+
+        Some(LRESULT(HTCLIENT as _))
+    }
+
+    pub fn on_dpi_changed(&mut self, new_dpi: u16) {
+        self.dpi = new_dpi as _;
+        for x in self.dpi_handlers.iter() {
+            if let Some(x) = x.upgrade() {
+                x.on_dpi_changed(new_dpi as _);
+            }
+        }
+    }
+
+    pub fn resize(&mut self, new_width: u16, new_height: u16) {
+        self.client_size_pixels.width = new_width as _;
+        self.client_size_pixels.height = new_height as _;
+
+        self.grid_view.resize(
+            self.client_size_pixels.width,
+            self.client_size_pixels.height,
+        );
+    }
+
+    pub fn on_mouse_move(&mut self, x_pixels: i16, y_pixels: i16) {
+        self.pointer_input_manager.on_mouse_move(
+            &mut self.ht,
+            self.ht_root,
+            self.client_size_pixels.to_dip(self.dpi),
+            signed_pixels_to_dip(x_pixels as _, self.dpi),
+            signed_pixels_to_dip(y_pixels as _, self.dpi),
+        );
+
+        // WM_SETCURSORが飛ばないことがあるのでここで設定する
+        if let Some(c) = self.pointer_input_manager.cursor(&self.ht) {
+            unsafe {
+                SetCursor(Some(c));
+            }
+        }
+    }
+
+    pub fn on_mouse_left_down(&mut self, hwnd: HWND, x_pixels: i16, y_pixels: i16) {
+        self.pointer_input_manager.on_mouse_left_down(
+            hwnd,
+            &mut self.ht,
+            self.ht_root,
+            self.client_size_pixels.to_dip(self.dpi),
+            signed_pixels_to_dip(x_pixels as _, self.dpi),
+            signed_pixels_to_dip(y_pixels as _, self.dpi),
+        );
+    }
+
+    pub fn on_mouse_left_up(&mut self, hwnd: HWND, x_pixels: i16, y_pixels: i16) {
+        self.pointer_input_manager.on_mouse_left_up(
+            hwnd,
+            &mut self.ht,
+            self.ht_root,
+            self.client_size_pixels.to_dip(self.dpi),
+            signed_pixels_to_dip(x_pixels as _, self.dpi),
+            signed_pixels_to_dip(y_pixels as _, self.dpi),
+        );
+    }
+
+    pub fn handle_set_cursor(&mut self) -> bool {
+        if let Some(c) = self.pointer_input_manager.cursor(&self.ht) {
+            unsafe {
+                SetCursor(Some(c));
+            }
+
+            return true;
+        }
+
+        false
     }
 }
 
@@ -2788,107 +3137,22 @@ fn main() {
         .expect("Failed to set dark mode preference");
     }
 
-    let desktop_window_target = unsafe {
-        subsystem
-            .compositor_desktop_interop
-            .CreateDesktopWindowTarget(hw, true)
-            .expect("Failed to create desktop window target")
+    let mut app_window_state_model = AppWindowStateModel::new(&subsystem, hw);
+
+    let grid_view_render_waits = unsafe {
+        app_window_state_model
+            .grid_view
+            .swapchain
+            .GetFrameLatencyWaitableObject()
     };
 
-    let mut cr = core::mem::MaybeUninit::uninit();
     unsafe {
-        GetClientRect(hw, cr.as_mut_ptr()).expect("Failed to get initial client rect size");
+        SetWindowLongPtrW(
+            hw,
+            GWLP_USERDATA,
+            &mut app_window_state_model as *mut _ as _,
+        );
     }
-    let cr = unsafe { cr.assume_init() };
-
-    let composition_root = subsystem
-        .compositor
-        .CreateContainerVisual()
-        .expect("Failed to create composition root visual");
-    composition_root
-        .SetRelativeSizeAdjustment(Vector2::one())
-        .expect("Failed to set root visual sizing");
-    desktop_window_target
-        .SetRoot(&composition_root)
-        .expect("Failed to set composition root visual");
-
-    let bg = subsystem
-        .compositor
-        .CreateSpriteVisual()
-        .expect("Failed to create bg visual");
-    bg.SetBrush(
-        &subsystem
-            .compositor
-            .CreateColorBrushWithColor(BG_COLOR)
-            .expect("Failed to create bg brush"),
-    )
-    .expect("Failed to set bg brush");
-    bg.SetRelativeSizeAdjustment(Vector2::one())
-        .expect("Failed to set bg size");
-    composition_root
-        .Children()
-        .expect("Failed to get children")
-        .InsertAtBottom(&bg)
-        .expect("Failed to insert bg");
-
-    let mut app_window_data = AppWindowData::new(
-        SizePixels {
-            width: (cr.right - cr.left) as _,
-            height: (cr.bottom - cr.top) as _,
-        },
-        unsafe { GetDpiForWindow(hw) as f32 },
-    );
-    unsafe {
-        SetWindowLongPtrW(hw, GWLP_USERDATA, &mut app_window_data as *mut _ as _);
-    }
-
-    let main_presenter = MainPresenter::new(
-        &mut PresenterInitContext {
-            for_view: ViewInitContext {
-                subsystem: &subsystem,
-                ht: &mut app_window_data.ht,
-                dpi: app_window_data.dpi,
-            },
-            dpi_handlers: &mut app_window_data.dpi_handlers,
-        },
-        400.0,
-    );
-    main_presenter.mount(
-        &mut app_window_data.ht,
-        &composition_root.Children().unwrap(),
-        app_window_data.ht_root,
-    );
-
-    let grid_view = Rc::new(AtlasBaseGridView::new(
-        &mut ViewInitContext {
-            subsystem: &subsystem,
-            ht: &mut app_window_data.ht,
-            dpi: app_window_data.dpi,
-        },
-        128,
-        128,
-    ));
-    grid_view.mount(&composition_root.Children().unwrap());
-    grid_view.resize(
-        app_window_data.client_size_pixels.width,
-        app_window_data.client_size_pixels.height,
-    );
-    app_window_data.grid_view = Rc::downgrade(&grid_view);
-
-    let header_view = AppHeaderView::new(
-        &mut ViewInitContext {
-            subsystem: &subsystem,
-            ht: &mut app_window_data.ht,
-            dpi: app_window_data.dpi,
-        },
-        "Peridot SpriteAtlas Visualizer/Editor",
-    );
-    header_view.mount(&composition_root.Children().unwrap());
-    app_window_data.header_height = header_view.height;
-
-    let grid_view_render_waits = unsafe { grid_view.swapchain.GetFrameLatencyWaitableObject() };
-
-    app_window_data.ht.dump(app_window_data.ht_root);
 
     unsafe {
         let _ = ShowWindow(hw, SW_SHOW);
@@ -2907,7 +3171,7 @@ fn main() {
 
         if r == WAIT_OBJECT_0 {
             // update grid view
-            grid_view.update_content(&subsystem);
+            app_window_state_model.grid_view.update_content(&subsystem);
             continue;
         }
         if r.0 == WAIT_OBJECT_0.0 + 1 {
@@ -2931,9 +3195,6 @@ fn main() {
     unsafe {
         SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
     }
-
-    main_presenter.unmount(&mut app_window_data.ht);
-    main_presenter.drop_context(&mut app_window_data.ht, &mut app_window_data.dpi_handlers);
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -3005,167 +3266,93 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     }
 
     if msg == WM_NCHITTEST {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        let resize_h = unsafe { GetSystemMetrics(SM_CYSIZEFRAME) };
-
-        let (x, y) = (
-            (lparam.0 & 0xffff) as i16 as i32,
-            ((lparam.0 >> 16) & 0xffff) as i16 as i32,
-        );
-        let mut p = [POINT { x, y }];
-        unsafe {
-            MapWindowPoints(None, Some(hwnd), &mut p);
+        if let Some(x) = state.nc_hittest(hwnd, wparam, lparam) {
+            return x;
         }
-        let [POINT { x, y }] = p;
-
-        if 0 > x
-            || x > app_window_data.client_size_pixels.width as i32
-            || 0 > y
-            || y > app_window_data.client_size_pixels.height as i32
-        {
-            // ウィンドウ範囲外はシステムにおまかせ
-            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-        }
-
-        if y < resize_h {
-            // global override
-            return LRESULT(HTTOP as _);
-        }
-
-        if signed_pixels_to_dip(y, app_window_data.dpi) < app_window_data.header_height {
-            return LRESULT(HTCAPTION as _);
-        }
-
-        return LRESULT(HTCLIENT as _);
     }
 
     if msg == WM_DPICHANGED {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        let new_dpi = (wparam.0 & 0xffff) as u16;
-        app_window_data.dpi = new_dpi as _;
-        for x in app_window_data.dpi_handlers.iter() {
-            if let Some(x) = x.upgrade() {
-                x.on_dpi_changed(new_dpi as _);
-            }
-        }
+        state.on_dpi_changed((wparam.0 & 0xffff) as u16);
     }
 
     if msg == WM_SIZE {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        app_window_data.client_size_pixels.width = (lparam.0 & 0xffff) as _;
-        app_window_data.client_size_pixels.height = ((lparam.0 >> 16) & 0xffff) as _;
-
-        if let Some(v) = app_window_data.grid_view.upgrade() {
-            v.resize(
-                app_window_data.client_size_pixels.width,
-                app_window_data.client_size_pixels.height,
-            );
-        }
-
+        state.resize(
+            (lparam.0 & 0xffff) as u16,
+            ((lparam.0 >> 16) & 0xffff) as u16,
+        );
         return LRESULT(0);
     }
 
     if msg == WM_MOUSEMOVE {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        app_window_data.pointer_input_manager.on_mouse_move(
-            &mut app_window_data.ht,
-            app_window_data.ht_root,
-            app_window_data
-                .client_size_pixels
-                .to_dip(app_window_data.dpi),
-            signed_pixels_to_dip((lparam.0 & 0xffff) as i16 as i32, app_window_data.dpi),
-            signed_pixels_to_dip(((lparam.0 >> 16) & 0xffff) as i16 as _, app_window_data.dpi),
+        state.on_mouse_move(
+            (lparam.0 & 0xffff) as i16,
+            ((lparam.0 >> 16) & 0xffff) as i16,
         );
-
-        // WM_SETCURSORが飛ばないことがあるのでここで設定する
-        if let Some(c) = app_window_data
-            .pointer_input_manager
-            .cursor(&app_window_data.ht)
-        {
-            unsafe {
-                SetCursor(Some(c));
-            }
-        }
-
         return LRESULT(0);
     }
 
     if msg == WM_LBUTTONDOWN {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        app_window_data.pointer_input_manager.on_mouse_left_down(
+        state.on_mouse_left_down(
             hwnd,
-            &mut app_window_data.ht,
-            app_window_data.ht_root,
-            app_window_data
-                .client_size_pixels
-                .to_dip(app_window_data.dpi),
-            signed_pixels_to_dip((lparam.0 & 0xffff) as i16 as i32, app_window_data.dpi),
-            signed_pixels_to_dip(((lparam.0 >> 16) & 0xffff) as i16 as _, app_window_data.dpi),
+            (lparam.0 & 0xffff) as i16,
+            ((lparam.0 >> 16) & 0xffff) as i16,
         );
-
         return LRESULT(0);
     }
 
     if msg == WM_LBUTTONUP {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        app_window_data.pointer_input_manager.on_mouse_left_up(
+        state.on_mouse_left_up(
             hwnd,
-            &mut app_window_data.ht,
-            app_window_data.ht_root,
-            app_window_data
-                .client_size_pixels
-                .to_dip(app_window_data.dpi),
-            signed_pixels_to_dip((lparam.0 & 0xffff) as i16 as i32, app_window_data.dpi),
-            signed_pixels_to_dip(((lparam.0 >> 16) & 0xffff) as i16 as _, app_window_data.dpi),
+            (lparam.0 & 0xffff) as i16,
+            ((lparam.0 >> 16) & 0xffff) as i16,
         );
-
         return LRESULT(0);
     }
 
     if msg == WM_SETCURSOR {
-        let Some(app_window_data) =
-            (unsafe { (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowData).as_mut() })
-        else {
+        let Some(state) = (unsafe {
+            (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppWindowStateModel).as_mut()
+        }) else {
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         };
 
-        if let Some(c) = app_window_data
-            .pointer_input_manager
-            .cursor(&app_window_data.ht)
-        {
-            unsafe {
-                SetCursor(Some(c));
-            }
+        if state.handle_set_cursor() {
             return LRESULT(1);
         }
     }
