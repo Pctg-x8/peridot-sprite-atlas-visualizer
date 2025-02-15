@@ -21,7 +21,7 @@ use windows::{
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
             },
             DirectWrite::{
-                DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection,
+                DWriteCreateFactory, IDWriteFactory, IDWriteFactory1, IDWriteFontCollection,
                 IDWriteFontCollectionLoader, IDWriteFontCollectionLoader_Impl,
                 IDWriteFontFileEnumerator, IDWriteFontFileEnumerator_Impl, IDWriteTextFormat,
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -92,12 +92,12 @@ impl Hash for TextFormatCacheKey {
 }
 
 pub struct TextFormatStore {
-    factory: IDWriteFactory,
+    factory: IDWriteFactory1,
     app_fc: IDWriteFontCollection,
     cache: RefCell<HashMap<TextFormatCacheKey, IDWriteTextFormat>>,
 }
 impl TextFormatStore {
-    pub fn new(factory: IDWriteFactory, app_fc: IDWriteFontCollection) -> Self {
+    pub fn new(factory: IDWriteFactory1, app_fc: IDWriteFontCollection) -> Self {
         Self {
             factory,
             app_fc,
@@ -140,7 +140,7 @@ pub struct Subsystem {
     pub d3d11_device: ID3D11Device,
     pub d3d11_imm_context: ID3D11DeviceContext,
     pub d2d1_device: ID2D1Device,
-    pub dwrite_factory: IDWriteFactory,
+    pub dwrite_factory: IDWriteFactory1,
     pub text_format_store: TextFormatStore,
     pub default_ui_format: IDWriteTextFormat,
     pub compositor: Compositor,
@@ -197,7 +197,7 @@ impl Subsystem {
                 .expect("Failed to create d2d1 device")
         };
 
-        let dwrite_factory: IDWriteFactory = unsafe {
+        let dwrite_factory: IDWriteFactory1 = unsafe {
             DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)
                 .expect("Failed to create dwrite factory")
         };

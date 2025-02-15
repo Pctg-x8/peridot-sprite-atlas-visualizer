@@ -3,10 +3,12 @@ use std::{
     rc::Rc,
 };
 
-use extra_bindings::Microsoft::Graphics::Canvas::{
-    CanvasComposite,
-    Effects::{ColorSourceEffect, CompositeEffect, GaussianBlurEffect},
+use composition_element_builder::{
+    CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
+    ContainerVisualParams, SpriteVisualParams,
 };
+use effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams};
+use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
 use subsystem::Subsystem;
 use windows::{
@@ -15,7 +17,10 @@ use windows::{
         Numerics::{Vector2, Vector3},
         Size, TimeSpan,
     },
-    Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat},
+    Graphics::{
+        DirectX::{DirectXAlphaMode, DirectXPixelFormat},
+        Effects::IGraphicsEffect,
+    },
     Win32::{
         Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
         Graphics::{
@@ -47,6 +52,10 @@ use windows::{
                 D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
                 D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV,
                 D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+            },
+            DirectWrite::{
+                IDWriteTextLayout1, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_RANGE,
             },
             Dwm::{
                 DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -90,13 +99,16 @@ use windows::{
     UI::{
         Color,
         Composition::{
-            CompositionDrawingSurface, CompositionEffectSourceParameter, CompositionStretch,
-            ContainerVisual, Desktop::DesktopWindowTarget, ScalarKeyFrameAnimation, SpriteVisual,
-            VisualCollection,
+            CompositionBrush, CompositionDrawingSurface, CompositionEffectBrush,
+            CompositionEffectSourceParameter, CompositionStretch, ContainerVisual,
+            Desktop::DesktopWindowTarget, ScalarKeyFrameAnimation, SpriteVisual, VisualCollection,
         },
     },
 };
+use windows_core::HSTRING;
 
+mod composition_element_builder;
+mod effect_builder;
 mod extra_bindings;
 mod hittest;
 mod input;
@@ -104,6 +116,15 @@ mod subsystem;
 
 use crate::hittest::*;
 use crate::input::*;
+
+macro_rules! scoped_try {
+    ($label: tt, $x: expr) => {
+        match $x {
+            Ok(v) => v,
+            Err(e) => break $label Err(e)
+        }
+    }
+}
 
 const fn timespan_ms(ms: u32) -> TimeSpan {
     TimeSpan {
@@ -1665,19 +1686,22 @@ impl AtlasBaseGridView {
                 .unwrap()
         };
 
-        let root = init.subsystem.compositor.CreateSpriteVisual().unwrap();
-        root.SetBrush(
-            &init
-                .subsystem
-                .compositor
-                .CreateSurfaceBrushWithSurface(&sc_surface)
-                .unwrap(),
-        )
-        .unwrap();
-        root.SetSize(Vector2 {
-            X: init_width_pixels as _,
-            Y: init_height_pixels as _,
-        })
+        let root = SpriteVisualParams {
+            brush: &CompositionSurfaceBrushParams {
+                surface: &sc_surface,
+                stretch: None,
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: None,
+            relative_offset_adjustment: None,
+            size: Some(Vector2 {
+                X: init_width_pixels as _,
+                Y: init_height_pixels as _,
+            }),
+            relative_size_adjustment: None,
+        }
+        .instantiate(&init.subsystem.compositor)
         .unwrap();
 
         let mut vsh = core::mem::MaybeUninit::uninit();
@@ -1930,28 +1954,232 @@ impl AtlasBaseGridView {
     }
 }
 
-pub struct AppCloseButtonView {
-    root: ContainerVisual,
+#[inline]
+fn create_instant_effect_brush(
+    subsystem: &Subsystem,
+    effect: impl windows::core::Param<IGraphicsEffect>,
+    source_params: &[(&HSTRING, CompositionBrush)],
+) -> windows::core::Result<CompositionEffectBrush> {
+    let x = subsystem
+        .compositor
+        .CreateEffectFactory(effect)?
+        .CreateBrush()?;
+    for (n, s) in source_params {
+        x.SetSourceParameter(n, s)?;
+    }
+
+    Ok(x)
 }
-impl AppCloseButtonView {
-    const BUTTON_SIZE: f32 = 24.0;
-    const ICON_SIZE: f32 = 6.0;
+
+const D2D1_COLOR_F_WHITE: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 1.0,
+};
+
+pub struct SpriteListPaneView {
+    root: ContainerVisual,
+    ht_root: HitTestTreeRef,
+    ht_adjust_area: HitTestTreeRef,
+    dpi: f32,
+    top: Cell<f32>,
+    width: Cell<f32>,
+}
+impl SpriteListPaneView {
+    const CORNER_RADIUS: f32 = 12.0;
+    const FRAME_TEX_SIZE: f32 = 32.0;
+    const BLUR_AMOUNT: f32 = 24.0;
+    const SURFACE_COLOR: windows::UI::Color = windows::UI::Color {
+        R: 255,
+        G: 255,
+        B: 255,
+        A: 128,
+    };
+    const SPACING: f32 = 16.0;
+    const ADJUST_AREA_THICKNESS: f32 = 4.0;
+
+    fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
+        let s = subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
+                    Height: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        let interop: ICompositionDrawingSurfaceInterop = s.cast().unwrap();
+        let mut offs = core::mem::MaybeUninit::uninit();
+        let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, offs.as_mut_ptr()).unwrap() };
+        let offs = unsafe { offs.assume_init() };
+        let r = 'drawing: {
+            let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None) });
+
+            let offs_dip = D2D_POINT_2F {
+                x: signed_pixels_to_dip(offs.x, dpi),
+                y: signed_pixels_to_dip(offs.y, dpi),
+            };
+
+            unsafe {
+                dc.SetDpi(dpi, dpi);
+                dc.Clear(None);
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: offs_dip.x,
+                            top: offs_dip.y,
+                            right: offs_dip.x + Self::FRAME_TEX_SIZE,
+                            bottom: offs_dip.y + Self::FRAME_TEX_SIZE,
+                        },
+                        radiusX: Self::CORNER_RADIUS,
+                        radiusY: Self::CORNER_RADIUS,
+                    },
+                    &brush,
+                );
+            }
+
+            Ok(())
+        };
+        unsafe {
+            interop.EndDraw().unwrap();
+        }
+        r.unwrap();
+
+        s
+    }
 
     pub fn new(init: &mut ViewInitContext) -> Self {
-        let icon_surface = init
+        let frame_surface = Self::gen_frame_tex(init.subsystem, init.dpi);
+
+        let root = ContainerVisualParams {
+            offset: Some(Vector3 {
+                X: dip_to_pixels(8.0, init.dpi),
+                Y: 0.0,
+                Z: 0.0,
+            }),
+            size: Some(Vector2 { X: 192.0, Y: 0.0 }),
+            relative_size_adjustment: Some(Vector2 { X: 0.0, Y: 1.0 }),
+            ..Default::default()
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let bg_base_brush = create_instant_effect_brush(
+            init.subsystem,
+            &CompositeEffectParams {
+                sources: &[
+                    GaussianBlurEffectParams {
+                        source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                        blur_amount: Some(Self::BLUR_AMOUNT / 3.0),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                    ColorSourceEffectParams {
+                        color: Some(Self::SURFACE_COLOR),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                ],
+                mode: None,
+            }
+            .instantiate()
+            .unwrap(),
+            &[(
+                h!("source"),
+                init.subsystem
+                    .compositor
+                    .CreateBackdropBrush()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let bg = SpriteVisualParams {
+            brush: &CompositionMaskBrushParams {
+                source: &bg_base_brush,
+                mask: &CompositionNineGridBrushParams {
+                    source: &CompositionSurfaceBrushParams {
+                        surface: &frame_surface,
+                        stretch: Some(CompositionStretch::Fill),
+                    }
+                    .instantiate(&init.subsystem.compositor)
+                    .unwrap(),
+                    insets: Some(dip_to_pixels(Self::CORNER_RADIUS, init.dpi)),
+                }
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: None,
+            relative_offset_adjustment: None,
+            size: None,
+            relative_size_adjustment: Some(Vector2::one()),
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let tl = unsafe {
+            init.subsystem
+                .dwrite_factory
+                .CreateTextLayout(
+                    &"Sprites".encode_utf16().collect::<Vec<_>>(),
+                    &init.subsystem.default_ui_format,
+                    f32::MAX,
+                    f32::MAX,
+                )
+                .unwrap()
+        };
+        unsafe {
+            tl.SetFontWeight(
+                DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_TEXT_RANGE {
+                    startPosition: 0,
+                    length: 7,
+                },
+            )
+            .unwrap();
+            tl.cast::<IDWriteTextLayout1>()
+                .unwrap()
+                .SetCharacterSpacing(
+                    0.2,
+                    0.2,
+                    0.1,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: 0,
+                        length: 7,
+                    },
+                )
+                .unwrap();
+        }
+        let mut tm = core::mem::MaybeUninit::uninit();
+        unsafe {
+            tl.GetMetrics(tm.as_mut_ptr()).unwrap();
+        }
+        let tm = unsafe { tm.assume_init() };
+        let header_surface = init
             .subsystem
             .composition_2d_graphics_device
             .CreateDrawingSurface(
                 Size {
-                    Width: dip_to_pixels(Self::ICON_SIZE, init.dpi),
-                    Height: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+                    Width: dip_to_pixels(tm.width, init.dpi),
+                    Height: dip_to_pixels(tm.height, init.dpi),
                 },
                 DirectXPixelFormat::B8G8R8A8UIntNormalized,
                 DirectXAlphaMode::Premultiplied,
             )
             .unwrap();
         {
-            let interop = icon_surface
+            let interop = header_surface
                 .cast::<ICompositionDrawingSurfaceInterop>()
                 .unwrap();
             let mut offset = core::mem::MaybeUninit::uninit();
@@ -1959,52 +2187,22 @@ impl AppCloseButtonView {
                 unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
             let offset = unsafe { offset.assume_init() };
             let r = 'drawing: {
-                let brush = match unsafe {
-                    dc.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.1,
-                            a: 1.0,
-                        },
-                        None,
-                    )
-                } {
-                    Ok(x) => x,
-                    Err(e) => break 'drawing Err(e),
-                };
-
-                let offset_x_dip = signed_pixels_to_dip(offset.x, init.dpi);
-                let offset_y_dip = signed_pixels_to_dip(offset.y, init.dpi);
+                let brush = scoped_try!(
+                    'drawing,
+                    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, None) }
+                );
 
                 unsafe {
                     dc.SetDpi(init.dpi, init.dpi);
                     dc.Clear(None);
-                    dc.DrawLine(
+                    dc.DrawTextLayout(
                         D2D_POINT_2F {
-                            x: offset_x_dip,
-                            y: offset_y_dip,
+                            x: signed_pixels_to_dip(offset.x, init.dpi),
+                            y: signed_pixels_to_dip(offset.y, init.dpi),
                         },
-                        D2D_POINT_2F {
-                            x: offset_x_dip + Self::ICON_SIZE,
-                            y: offset_y_dip + Self::ICON_SIZE,
-                        },
+                        &tl,
                         &brush,
-                        1.5,
-                        None,
-                    );
-                    dc.DrawLine(
-                        D2D_POINT_2F {
-                            x: offset_x_dip + Self::ICON_SIZE,
-                            y: offset_y_dip,
-                        },
-                        D2D_POINT_2F {
-                            x: offset_x_dip,
-                            y: offset_y_dip + Self::ICON_SIZE,
-                        },
-                        &brush,
-                        1.5,
-                        None,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
                     );
                 }
 
@@ -2015,6 +2213,326 @@ impl AppCloseButtonView {
             }
             r.unwrap();
         }
+
+        let header = SpriteVisualParams {
+            brush: &CompositionSurfaceBrushParams {
+                surface: &header_surface,
+                stretch: None,
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: Some(Vector3 {
+                X: dip_to_pixels(-tm.width * 0.5, init.dpi),
+                Y: dip_to_pixels(Self::CORNER_RADIUS, init.dpi),
+                Z: 0.0,
+            }),
+            relative_offset_adjustment: Some(Vector3 {
+                X: 0.5,
+                Y: 0.0,
+                Z: 0.0,
+            }),
+            size: Some(Vector2 {
+                X: dip_to_pixels(tm.width, init.dpi),
+                Y: dip_to_pixels(tm.height, init.dpi),
+            }),
+            relative_size_adjustment: None,
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let children = root.Children().unwrap();
+        children.InsertAtTop(&bg).unwrap();
+        children.InsertAtTop(&header).unwrap();
+
+        let ht_root = init.ht.alloc(HitTestTreeData {
+            left: Self::SPACING,
+            top: 0.0,
+            left_adjustment_factor: 0.0,
+            top_adjustment_factor: 0.0,
+            width: 192.0,
+            height: -Self::SPACING,
+            width_adjustment_factor: 0.0,
+            height_adjustment_factor: 1.0,
+            parent: None,
+            children: Vec::new(),
+            action_handler: None,
+        });
+        let ht_adjust_area = init.ht.alloc(HitTestTreeData {
+            left: -Self::ADJUST_AREA_THICKNESS * 0.5,
+            top: 0.0,
+            left_adjustment_factor: 1.0,
+            top_adjustment_factor: 0.0,
+            width: Self::ADJUST_AREA_THICKNESS,
+            height: 0.0,
+            width_adjustment_factor: 0.0,
+            height_adjustment_factor: 1.0,
+            parent: None,
+            children: Vec::new(),
+            action_handler: None,
+        });
+        init.ht.add_child(ht_root, ht_adjust_area);
+
+        Self {
+            root,
+            ht_root,
+            ht_adjust_area,
+            dpi: init.dpi,
+            top: Cell::new(0.0),
+            width: Cell::new(192.0),
+        }
+    }
+
+    pub fn mount(
+        &self,
+        children: &VisualCollection,
+        ht: &mut HitTestTreeContext,
+        ht_parent: HitTestTreeRef,
+    ) {
+        children.InsertAtTop(&self.root).unwrap();
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn unmount(&self, ht: &mut HitTestTreeContext) {
+        self.root
+            .Parent()
+            .unwrap()
+            .Children()
+            .unwrap()
+            .Remove(&self.root)
+            .unwrap();
+        ht.remove_child(self.ht_root);
+    }
+
+    pub fn shutdown(&self, ht: &mut HitTestTreeContext) {
+        ht.free_rec(self.ht_root);
+    }
+
+    pub fn set_top(&self, ht: &mut HitTestTreeContext, top: f32) {
+        self.root
+            .SetOffset(Vector3 {
+                X: dip_to_pixels(Self::SPACING, self.dpi),
+                Y: dip_to_pixels(top, self.dpi),
+                Z: 0.0,
+            })
+            .unwrap();
+        self.root
+            .SetSize(Vector2 {
+                X: dip_to_pixels(self.width.get(), self.dpi),
+                Y: dip_to_pixels(-top - Self::SPACING, self.dpi),
+            })
+            .unwrap();
+        ht.get_mut(self.ht_root).top = top;
+        ht.get_mut(self.ht_root).height = -top - Self::SPACING;
+
+        self.top.set(top);
+    }
+
+    pub fn set_width(&self, ht: &mut HitTestTreeContext, width: f32) {
+        self.root
+            .SetSize(Vector2 {
+                X: dip_to_pixels(width, self.dpi),
+                Y: dip_to_pixels(-self.top.get() - Self::SPACING, self.dpi),
+            })
+            .unwrap();
+        ht.get_mut(self.ht_root).width = width;
+
+        self.width.set(width);
+    }
+}
+
+pub struct SpriteListPaneHitActionHandler {
+    pub view: Rc<SpriteListPaneView>,
+    adjust_drag_state: Cell<Option<(f32, f32)>>,
+}
+impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
+    fn cursor(&self, sender: HitTestTreeRef) -> Option<HCURSOR> {
+        if sender == self.view.ht_adjust_area {
+            // TODO: 必要そうならキャッシュする
+            return Some(unsafe { LoadCursorW(None, IDC_SIZEWE).unwrap() });
+        }
+
+        None
+    }
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        _ht: &mut HitTestTreeContext,
+        client_x: f32,
+        _client_y: f32,
+    ) -> EventContinueControl {
+        if sender == self.view.ht_adjust_area {
+            self.adjust_drag_state
+                .set(Some((client_x, self.view.width.get())));
+
+            return EventContinueControl::CAPTURE_ELEMENT | EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        _client_y: f32,
+    ) -> EventContinueControl {
+        if sender == self.view.ht_adjust_area {
+            if let Some((base_x, base_width)) = self.adjust_drag_state.get() {
+                let new_width = (base_width + (client_x - base_x)).max(10.0);
+                self.view.set_width(ht, new_width);
+            }
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        _client_y: f32,
+    ) -> EventContinueControl {
+        if sender == self.view.ht_adjust_area {
+            if let Some((base_x, base_width)) = self.adjust_drag_state.replace(None) {
+                let new_width = (base_width + (client_x - base_x)).max(10.0);
+                self.view.set_width(ht, new_width);
+            }
+
+            return EventContinueControl::RELEASE_CAPTURE_ELEMENT
+                | EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
+pub struct SpriteListPanePresenter {
+    view: Rc<SpriteListPaneView>,
+    _ht_action_handler: Rc<SpriteListPaneHitActionHandler>,
+}
+impl SpriteListPanePresenter {
+    pub fn new(init: &mut PresenterInitContext) -> Self {
+        let view = Rc::new(SpriteListPaneView::new(&mut init.for_view));
+
+        let ht_action_handler = Rc::new(SpriteListPaneHitActionHandler {
+            view: view.clone(),
+            adjust_drag_state: Cell::new(None),
+        });
+        init.for_view.ht.get_mut(view.ht_adjust_area).action_handler =
+            Some(Rc::downgrade(&ht_action_handler) as _);
+
+        Self {
+            view,
+            _ht_action_handler: ht_action_handler,
+        }
+    }
+
+    pub fn mount(
+        &self,
+        children: &VisualCollection,
+        ht: &mut HitTestTreeContext,
+        ht_parent: HitTestTreeRef,
+    ) {
+        self.view.mount(children, ht, ht_parent);
+    }
+
+    pub fn unmount(&self, ht: &mut HitTestTreeContext) {
+        self.view.unmount(ht);
+    }
+
+    pub fn shutdown(&self, ht: &mut HitTestTreeContext) {
+        self.view.shutdown(ht);
+    }
+
+    pub fn set_top(&self, ht: &mut HitTestTreeContext, top: f32) {
+        self.view.set_top(ht, top);
+    }
+}
+
+pub struct AppCloseButtonView {
+    root: ContainerVisual,
+}
+impl AppCloseButtonView {
+    const BUTTON_SIZE: f32 = 24.0;
+    const ICON_SIZE: f32 = 6.0;
+
+    fn build_icon_surface(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
+        let icon_surface = subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(Self::ICON_SIZE, dpi),
+                    Height: dip_to_pixels(Self::ICON_SIZE, dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+
+        let interop = icon_surface
+            .cast::<ICompositionDrawingSurfaceInterop>()
+            .unwrap();
+        let mut offset = core::mem::MaybeUninit::uninit();
+        let dc: ID2D1DeviceContext =
+            unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+        let offset = unsafe { offset.assume_init() };
+        let r = 'drawing: {
+            let brush = scoped_try!(
+                'drawing,
+                unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0, }, None) }
+            );
+
+            let offset_x_dip = signed_pixels_to_dip(offset.x, dpi);
+            let offset_y_dip = signed_pixels_to_dip(offset.y, dpi);
+
+            unsafe {
+                dc.SetDpi(dpi, dpi);
+                dc.Clear(None);
+                dc.DrawLine(
+                    D2D_POINT_2F {
+                        x: offset_x_dip,
+                        y: offset_y_dip,
+                    },
+                    D2D_POINT_2F {
+                        x: offset_x_dip + Self::ICON_SIZE,
+                        y: offset_y_dip + Self::ICON_SIZE,
+                    },
+                    &brush,
+                    1.5,
+                    None,
+                );
+                dc.DrawLine(
+                    D2D_POINT_2F {
+                        x: offset_x_dip + Self::ICON_SIZE,
+                        y: offset_y_dip,
+                    },
+                    D2D_POINT_2F {
+                        x: offset_x_dip,
+                        y: offset_y_dip + Self::ICON_SIZE,
+                    },
+                    &brush,
+                    1.5,
+                    None,
+                );
+            }
+
+            Ok(())
+        };
+        unsafe {
+            interop.EndDraw().unwrap();
+        }
+        r.unwrap();
+
+        icon_surface
+    }
+
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let icon_surface = Self::build_icon_surface(init.subsystem, init.dpi);
 
         let circle_mask_surface = init
             .subsystem
@@ -2129,112 +2647,100 @@ impl AppCloseButtonView {
             r.unwrap();
         }
 
-        let root = init.subsystem.compositor.CreateContainerVisual().unwrap();
-        root.SetSize(Vector2 {
-            X: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
-            Y: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
-        })
+        let root = ContainerVisualParams {
+            size: Some(Vector2 {
+                X: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+                Y: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+            }),
+            ..Default::default()
+        }
+        .instantiate(&init.subsystem.compositor)
         .unwrap();
 
-        let blur_effect = GaussianBlurEffect::new().unwrap();
-        blur_effect.SetBlurAmount(9.0 / 3.0).unwrap();
-        blur_effect
-            .SetSource(&CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap())
-            .unwrap();
-        let blur_effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactory(&blur_effect)
-            .unwrap();
-        let color_source_effect = ColorSourceEffect::new().unwrap();
-        color_source_effect
-            .SetColor(windows::UI::Color {
-                A: 128,
-                R: 255,
-                G: 255,
-                B: 255,
-            })
-            .unwrap();
-        let color_source_effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactory(&color_source_effect)
-            .unwrap();
-        let composite_effect = CompositeEffect::new().unwrap();
-        composite_effect
-            .SetMode(CanvasComposite::SourceOver)
-            .unwrap();
-        composite_effect
-            .Sources()
-            .unwrap()
-            .Append(&CompositionEffectSourceParameter::Create(h!("backdrop_effected")).unwrap())
-            .unwrap();
-        composite_effect
-            .Sources()
-            .unwrap()
-            .Append(&CompositionEffectSourceParameter::Create(h!("over_color")).unwrap())
-            .unwrap();
-        let composite_effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactory(&composite_effect)
-            .unwrap();
-
-        let backdrop_brush = init.subsystem.compositor.CreateBackdropBrush().unwrap();
-        let blur_brush = blur_effect_factory.CreateBrush().unwrap();
-        let effect_over_color_brush = color_source_effect_factory.CreateBrush().unwrap();
-        let bg_brush = composite_effect_factory.CreateBrush().unwrap();
-        blur_brush
-            .SetSourceParameter(h!("backdrop"), &backdrop_brush)
-            .unwrap();
-        bg_brush
-            .SetSourceParameter(h!("backdrop_effected"), &blur_brush)
-            .unwrap();
-        bg_brush
-            .SetSourceParameter(h!("over_color"), &effect_over_color_brush)
-            .unwrap();
-
-        let bg_masked_brush = init.subsystem.compositor.CreateMaskBrush().unwrap();
-        bg_masked_brush.SetSource(&bg_brush).unwrap();
-        bg_masked_brush
-            .SetMask(
-                &init
-                    .subsystem
-                    .compositor
-                    .CreateSurfaceBrushWithSurface(&circle_mask_surface)
+        let bg_brush = create_instant_effect_brush(
+            init.subsystem,
+            &CompositeEffectParams {
+                sources: &[
+                    GaussianBlurEffectParams {
+                        source: &CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap(),
+                        blur_amount: Some(9.0 / 3.0),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
                     .unwrap(),
-            )
-            .unwrap();
+                    ColorSourceEffectParams {
+                        color: Some(windows::UI::Color {
+                            A: 128,
+                            R: 255,
+                            G: 255,
+                            B: 255,
+                        }),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                ],
+                mode: Some(CanvasComposite::SourceOver),
+            }
+            .instantiate()
+            .unwrap(),
+            &[(
+                h!("backdrop"),
+                init.subsystem
+                    .compositor
+                    .CreateBackdropBrush()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+            )],
+        )
+        .unwrap();
 
-        let bg = init.subsystem.compositor.CreateSpriteVisual().unwrap();
-        bg.SetBrush(&bg_masked_brush).unwrap();
-        bg.SetRelativeSizeAdjustment(Vector2::one()).unwrap();
+        let bg = SpriteVisualParams {
+            brush: &CompositionMaskBrushParams {
+                source: &bg_brush,
+                mask: &CompositionSurfaceBrushParams {
+                    surface: &circle_mask_surface,
+                    stretch: None,
+                }
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: None,
+            relative_offset_adjustment: None,
+            size: None,
+            relative_size_adjustment: Some(Vector2::one()),
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
 
-        let icon = init.subsystem.compositor.CreateSpriteVisual().unwrap();
-        icon.SetBrush(
-            &init
+        let icon = SpriteVisualParams {
+            brush: &init
                 .subsystem
                 .compositor
                 .CreateSurfaceBrushWithSurface(&icon_surface)
                 .unwrap(),
-        )
-        .unwrap();
-        icon.SetSize(Vector2 {
-            X: dip_to_pixels(Self::ICON_SIZE, init.dpi),
-            Y: dip_to_pixels(Self::ICON_SIZE, init.dpi),
-        })
-        .unwrap();
-        icon.SetOffset(Vector3 {
-            X: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
-            Y: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
-            Z: 0.0,
-        })
-        .unwrap();
-        icon.SetRelativeOffsetAdjustment(Vector3 {
-            X: 0.5,
-            Y: 0.5,
-            Z: 0.0,
-        })
+            offset: Some(Vector3 {
+                X: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+                Y: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+                Z: 0.0,
+            }),
+            relative_offset_adjustment: Some(Vector3 {
+                X: 0.5,
+                Y: 0.5,
+                Z: 0.0,
+            }),
+            size: Some(Vector2 {
+                X: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+                Y: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+            }),
+            relative_size_adjustment: None,
+        }
+        .instantiate(&init.subsystem.compositor)
         .unwrap();
 
         let children = root.Children().unwrap();
@@ -2265,6 +2771,12 @@ pub struct AppMinimizeButtonView {
 impl AppMinimizeButtonView {
     const BUTTON_SIZE: f32 = 20.0;
     const ICON_SIZE: f32 = 6.0;
+    const SURFACE_COLOR: windows::UI::Color = windows::UI::Color {
+        A: 128,
+        R: 255,
+        G: 255,
+        B: 255,
+    };
 
     pub fn new(init: &mut ViewInitContext) -> Self {
         let icon_surface = init
@@ -2288,20 +2800,10 @@ impl AppMinimizeButtonView {
                 unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
             let offset = unsafe { offset.assume_init() };
             let r = 'drawing: {
-                let brush = match unsafe {
-                    dc.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.1,
-                            a: 1.0,
-                        },
-                        None,
-                    )
-                } {
-                    Ok(x) => x,
-                    Err(e) => break 'drawing Err(e),
-                };
+                let brush = scoped_try!(
+                    'drawing,
+                    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0, }, None) }
+                );
 
                 let offset_x_dip = signed_pixels_to_dip(offset.x, init.dpi);
                 let offset_y_dip = signed_pixels_to_dip(offset.y, init.dpi);
@@ -2445,112 +2947,95 @@ impl AppMinimizeButtonView {
             r.unwrap();
         }
 
-        let root = init.subsystem.compositor.CreateContainerVisual().unwrap();
-        root.SetSize(Vector2 {
-            X: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
-            Y: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
-        })
+        let root = ContainerVisualParams {
+            size: Some(Vector2 {
+                X: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+                Y: dip_to_pixels(Self::BUTTON_SIZE, init.dpi),
+            }),
+            ..Default::default()
+        }
+        .instantiate(&init.subsystem.compositor)
         .unwrap();
 
-        let blur_effect = GaussianBlurEffect::new().unwrap();
-        blur_effect.SetBlurAmount(9.0 / 3.0).unwrap();
-        blur_effect
-            .SetSource(&CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap())
-            .unwrap();
-        let blur_effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactory(&blur_effect)
-            .unwrap();
-        let color_source_effect = ColorSourceEffect::new().unwrap();
-        color_source_effect
-            .SetColor(windows::UI::Color {
-                A: 128,
-                R: 255,
-                G: 255,
-                B: 255,
-            })
-            .unwrap();
-        let color_source_effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactory(&color_source_effect)
-            .unwrap();
-        let composite_effect = CompositeEffect::new().unwrap();
-        composite_effect
-            .SetMode(CanvasComposite::SourceOver)
-            .unwrap();
-        composite_effect
-            .Sources()
-            .unwrap()
-            .Append(&CompositionEffectSourceParameter::Create(h!("backdrop_effected")).unwrap())
-            .unwrap();
-        composite_effect
-            .Sources()
-            .unwrap()
-            .Append(&CompositionEffectSourceParameter::Create(h!("over_color")).unwrap())
-            .unwrap();
-        let composite_effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactory(&composite_effect)
-            .unwrap();
-
-        let backdrop_brush = init.subsystem.compositor.CreateBackdropBrush().unwrap();
-        let blur_brush = blur_effect_factory.CreateBrush().unwrap();
-        let effect_over_color_brush = color_source_effect_factory.CreateBrush().unwrap();
-        let bg_brush = composite_effect_factory.CreateBrush().unwrap();
-        blur_brush
-            .SetSourceParameter(h!("backdrop"), &backdrop_brush)
-            .unwrap();
-        bg_brush
-            .SetSourceParameter(h!("backdrop_effected"), &blur_brush)
-            .unwrap();
-        bg_brush
-            .SetSourceParameter(h!("over_color"), &effect_over_color_brush)
-            .unwrap();
-
-        let bg_masked_brush = init.subsystem.compositor.CreateMaskBrush().unwrap();
-        bg_masked_brush.SetSource(&bg_brush).unwrap();
-        bg_masked_brush
-            .SetMask(
-                &init
-                    .subsystem
-                    .compositor
-                    .CreateSurfaceBrushWithSurface(&circle_mask_surface)
+        let bg_brush = create_instant_effect_brush(
+            init.subsystem,
+            &CompositeEffectParams {
+                sources: &[
+                    GaussianBlurEffectParams {
+                        source: &CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap(),
+                        blur_amount: Some(9.0 / 3.0),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
                     .unwrap(),
-            )
-            .unwrap();
+                    ColorSourceEffectParams {
+                        color: Some(Self::SURFACE_COLOR),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                ],
+                mode: Some(CanvasComposite::SourceOver),
+            }
+            .instantiate()
+            .unwrap(),
+            &[(
+                h!("backdrop"),
+                init.subsystem
+                    .compositor
+                    .CreateBackdropBrush()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+            )],
+        )
+        .unwrap();
 
-        let bg = init.subsystem.compositor.CreateSpriteVisual().unwrap();
-        bg.SetBrush(&bg_masked_brush).unwrap();
-        bg.SetRelativeSizeAdjustment(Vector2::one()).unwrap();
+        let bg = SpriteVisualParams {
+            brush: &CompositionMaskBrushParams {
+                source: &bg_brush,
+                mask: &CompositionSurfaceBrushParams {
+                    surface: &circle_mask_surface,
+                    stretch: None,
+                }
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: None,
+            relative_offset_adjustment: None,
+            size: None,
+            relative_size_adjustment: Some(Vector2::one()),
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
 
-        let icon = init.subsystem.compositor.CreateSpriteVisual().unwrap();
-        icon.SetBrush(
-            &init
+        let icon = SpriteVisualParams {
+            brush: &init
                 .subsystem
                 .compositor
                 .CreateSurfaceBrushWithSurface(&icon_surface)
                 .unwrap(),
-        )
-        .unwrap();
-        icon.SetSize(Vector2 {
-            X: dip_to_pixels(Self::ICON_SIZE, init.dpi),
-            Y: dip_to_pixels(Self::ICON_SIZE, init.dpi),
-        })
-        .unwrap();
-        icon.SetOffset(Vector3 {
-            X: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
-            Y: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
-            Z: 0.0,
-        })
-        .unwrap();
-        icon.SetRelativeOffsetAdjustment(Vector3 {
-            X: 0.5,
-            Y: 0.5,
-            Z: 0.0,
-        })
+            offset: Some(Vector3 {
+                X: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+                Y: dip_to_pixels(-Self::ICON_SIZE * 0.5, init.dpi),
+                Z: 0.0,
+            }),
+            relative_offset_adjustment: Some(Vector3 {
+                X: 0.5,
+                Y: 0.5,
+                Z: 0.0,
+            }),
+            size: Some(Vector2 {
+                X: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+                Y: dip_to_pixels(Self::ICON_SIZE, init.dpi),
+            }),
+            relative_size_adjustment: None,
+        }
+        .instantiate(&init.subsystem.compositor)
         .unwrap();
 
         let children = root.Children().unwrap();
@@ -2660,14 +3145,16 @@ impl AppHeaderView {
         }
 
         let height = 32.0 + tm.height;
-        let root = init.subsystem.compositor.CreateContainerVisual().unwrap();
-        root.SetSize(Vector2 {
-            X: 0.0,
-            Y: dip_to_pixels(height, init.dpi),
-        })
+        let root = ContainerVisualParams {
+            size: Some(Vector2 {
+                X: 0.0,
+                Y: dip_to_pixels(height, init.dpi),
+            }),
+            relative_size_adjustment: Some(Vector2 { X: 1.0, Y: 0.0 }),
+            ..Default::default()
+        }
+        .instantiate(&init.subsystem.compositor)
         .unwrap();
-        root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 0.0 })
-            .unwrap();
 
         let bg_brush = init
             .subsystem
@@ -2714,10 +3201,15 @@ impl AppHeaderView {
             .unwrap();
         bg_brush.SetStartPoint(Vector2 { X: 0.0, Y: 0.0 }).unwrap();
         bg_brush.SetEndPoint(Vector2 { X: 0.0, Y: 1.0 }).unwrap();
-        let bg = init.subsystem.compositor.CreateSpriteVisual().unwrap();
-        bg.SetBrush(&bg_brush).unwrap();
-        bg.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })
-            .unwrap();
+        let bg = SpriteVisualParams {
+            brush: &bg_brush,
+            offset: None,
+            relative_offset_adjustment: None,
+            size: None,
+            relative_size_adjustment: Some(Vector2::one()),
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
 
         let label = init.subsystem.compositor.CreateSpriteVisual().unwrap();
         label
@@ -2858,6 +3350,7 @@ struct AppWindowStateModel {
     composition_root: ContainerVisual,
     header_view: AppHeaderView,
     grid_view: AtlasBaseGridView,
+    sprite_list_pane: SpriteListPanePresenter,
 }
 impl AppWindowStateModel {
     pub fn new(subsystem: &Subsystem, bound_hwnd: HWND) -> Self {
@@ -2890,7 +3383,7 @@ impl AppWindowStateModel {
         };
         let dpi = unsafe { GetDpiForWindow(bound_hwnd) as f32 };
         println!("init dpi: {dpi}");
-        let dpi_handlers = Vec::new();
+        let mut dpi_handlers = Vec::new();
         let pointer_input_manager = PointerInputManager::new();
 
         let composition_target = unsafe {
@@ -2925,21 +3418,33 @@ impl AppWindowStateModel {
             .InsertAtBottom(&bg)
             .expect("Failed to insert bg");
 
-        let mut view_init_context = ViewInitContext {
-            subsystem,
-            ht: &mut ht,
-            dpi,
+        let mut presenter_init_context = PresenterInitContext {
+            for_view: ViewInitContext {
+                subsystem,
+                ht: &mut ht,
+                dpi,
+            },
+            dpi_handlers: &mut dpi_handlers,
         };
 
-        let grid_view = AtlasBaseGridView::new(&mut view_init_context, 128, 128);
+        let grid_view = AtlasBaseGridView::new(&mut presenter_init_context.for_view, 128, 128);
         grid_view.mount(&composition_root.Children().unwrap());
         grid_view.resize(client_size_pixels.width, client_size_pixels.height);
 
+        let sprite_list_pane = SpriteListPanePresenter::new(&mut presenter_init_context);
+        sprite_list_pane.mount(
+            &composition_root.Children().unwrap(),
+            &mut presenter_init_context.for_view.ht,
+            ht_root,
+        );
+
         let header_view = AppHeaderView::new(
-            &mut view_init_context,
+            &mut presenter_init_context.for_view,
             "Peridot SpriteAtlas Visualizer/Editor",
         );
         header_view.mount(&composition_root.Children().unwrap());
+
+        sprite_list_pane.set_top(&mut ht, header_view.height);
 
         ht.dump(ht_root);
 
@@ -2954,7 +3459,12 @@ impl AppWindowStateModel {
             composition_root,
             header_view,
             grid_view,
+            sprite_list_pane,
         }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.sprite_list_pane.shutdown(&mut self.ht);
     }
 
     pub fn client_size_dip(&self) -> Size {
@@ -3113,7 +3623,7 @@ fn main() {
         CreateWindowExW(
             WS_EX_APPWINDOW | WS_EX_OVERLAPPEDWINDOW | WS_EX_NOREDIRECTIONBITMAP,
             PCWSTR(ca as _),
-            w!("Peridot Sprite Atlas Visualizer/Editor"),
+            w!("Peridot SpriteAtlas Visualizer/Editor"),
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -3195,6 +3705,7 @@ fn main() {
     unsafe {
         SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
     }
+    app_window_state_model.shutdown();
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
