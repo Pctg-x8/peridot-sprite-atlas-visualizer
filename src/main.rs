@@ -1978,6 +1978,219 @@ const D2D1_COLOR_F_WHITE: D2D1_COLOR_F = D2D1_COLOR_F {
     a: 1.0,
 };
 
+pub struct SpriteListCellView {
+    root: ContainerVisual,
+    top: Cell<f32>,
+}
+impl SpriteListCellView {
+    const FRAME_TEX_SIZE: f32 = 24.0;
+    const CORNER_RADIUS: f32 = 8.0;
+    const CELL_HEIGHT: f32 = 20.0;
+
+    fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
+        let s = subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
+                    Height: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        let interop: ICompositionDrawingSurfaceInterop = s.cast().unwrap();
+        let mut offs = core::mem::MaybeUninit::uninit();
+        let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, offs.as_mut_ptr()).unwrap() };
+        let offs = unsafe { offs.assume_init() };
+        let r = 'drawing: {
+            let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.875, g: 0.875, b: 0.875, a: 0.25 }, None) });
+
+            let offs_dip = D2D_POINT_2F {
+                x: signed_pixels_to_dip(offs.x, dpi),
+                y: signed_pixels_to_dip(offs.y, dpi),
+            };
+
+            unsafe {
+                dc.SetDpi(dpi, dpi);
+                dc.Clear(None);
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: offs_dip.x,
+                            top: offs_dip.y,
+                            right: offs_dip.x + Self::FRAME_TEX_SIZE,
+                            bottom: offs_dip.y + Self::FRAME_TEX_SIZE,
+                        },
+                        radiusX: Self::CORNER_RADIUS,
+                        radiusY: Self::CORNER_RADIUS,
+                    },
+                    &brush,
+                );
+            }
+
+            Ok(())
+        };
+        unsafe {
+            interop.EndDraw().unwrap();
+        }
+        r.unwrap();
+
+        s
+    }
+
+    pub fn new(init: &mut ViewInitContext, label: &str, init_top: f32) -> Self {
+        let frame_tex = Self::gen_frame_tex(init.subsystem, init.dpi);
+
+        let tl = unsafe {
+            init.subsystem
+                .dwrite_factory
+                .CreateTextLayout(
+                    &label.encode_utf16().collect::<Vec<_>>(),
+                    &init.subsystem.default_ui_format,
+                    f32::MAX,
+                    f32::MAX,
+                )
+                .unwrap()
+        };
+        let mut tm = core::mem::MaybeUninit::uninit();
+        unsafe {
+            tl.GetMetrics(tm.as_mut_ptr()).unwrap();
+        }
+        let tm = unsafe { tm.assume_init() };
+        let label_surface = init
+            .subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(tm.width, init.dpi),
+                    Height: dip_to_pixels(tm.height, init.dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        {
+            let interop = label_surface
+                .cast::<ICompositionDrawingSurfaceInterop>()
+                .unwrap();
+            let mut offset = core::mem::MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                let brush = scoped_try!(
+                    'drawing,
+                    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, None) }
+                );
+
+                unsafe {
+                    dc.SetDpi(init.dpi, init.dpi);
+                    dc.Clear(None);
+                    dc.DrawTextLayout(
+                        D2D_POINT_2F {
+                            x: signed_pixels_to_dip(offset.x, init.dpi),
+                            y: signed_pixels_to_dip(offset.y, init.dpi),
+                        },
+                        &tl,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
+
+        let root = ContainerVisualParams {
+            offset: Some(Vector3 {
+                X: dip_to_pixels(16.0, init.dpi),
+                Y: dip_to_pixels(init_top, init.dpi),
+                Z: 0.0,
+            }),
+            relative_offset_adjustment: None,
+            size: Some(Vector2 {
+                X: dip_to_pixels(-32.0, init.dpi),
+                Y: dip_to_pixels(Self::CELL_HEIGHT, init.dpi),
+            }),
+            relative_size_adjustment: Some(Vector2 { X: 1.0, Y: 0.0 }),
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let bg = SpriteVisualParams {
+            brush: &CompositionNineGridBrushParams {
+                source: &CompositionSurfaceBrushParams {
+                    surface: &frame_tex,
+                    stretch: Some(CompositionStretch::Fill),
+                }
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+                insets: Some(dip_to_pixels(Self::CORNER_RADIUS, init.dpi)),
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: None,
+            relative_offset_adjustment: None,
+            size: None,
+            relative_size_adjustment: Some(Vector2::one()),
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let label = SpriteVisualParams {
+            brush: &CompositionSurfaceBrushParams {
+                surface: &label_surface,
+                stretch: None,
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+            offset: Some(Vector3 {
+                X: dip_to_pixels(8.0, init.dpi),
+                Y: -dip_to_pixels(tm.height * 0.5, init.dpi),
+                Z: 0.0,
+            }),
+            relative_offset_adjustment: Some(Vector3 {
+                X: 0.0,
+                Y: 0.5,
+                Z: 0.0,
+            }),
+            size: Some(Vector2 {
+                X: dip_to_pixels(tm.width, init.dpi),
+                Y: dip_to_pixels(tm.height, init.dpi),
+            }),
+            relative_size_adjustment: None,
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let children = root.Children().unwrap();
+        children.InsertAtTop(&bg).unwrap();
+        children.InsertAtTop(&label).unwrap();
+
+        Self {
+            root,
+            top: Cell::new(init_top),
+        }
+    }
+
+    pub fn mount(&self, children: &VisualCollection) {
+        children.InsertAtTop(&self.root).unwrap();
+    }
+
+    pub fn unmount(&self) {
+        self.root
+            .Parent()
+            .unwrap()
+            .Children()
+            .unwrap()
+            .Remove(&self.root)
+            .unwrap();
+    }
+}
+
 pub struct SpriteListPaneView {
     root: ContainerVisual,
     ht_root: HitTestTreeRef,
@@ -1994,10 +2207,11 @@ impl SpriteListPaneView {
         R: 255,
         G: 255,
         B: 255,
-        A: 128,
+        A: 160,
     };
-    const SPACING: f32 = 16.0;
+    const SPACING: f32 = 8.0;
     const ADJUST_AREA_THICKNESS: f32 = 4.0;
+    const INIT_WIDTH: f32 = 280.0;
 
     fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
         let s = subsystem
@@ -2060,7 +2274,10 @@ impl SpriteListPaneView {
                 Y: 0.0,
                 Z: 0.0,
             }),
-            size: Some(Vector2 { X: 192.0, Y: 0.0 }),
+            size: Some(Vector2 {
+                X: dip_to_pixels(Self::INIT_WIDTH, init.dpi),
+                Y: 0.0,
+            }),
             relative_size_adjustment: Some(Vector2 { X: 0.0, Y: 1.0 }),
             ..Default::default()
         }
@@ -2213,6 +2430,50 @@ impl SpriteListPaneView {
             }
             r.unwrap();
         }
+        let header_surface_w = init
+            .subsystem
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(tm.width + 18.0, init.dpi),
+                    Height: dip_to_pixels(tm.height + 18.0, init.dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        {
+            let interop = header_surface_w
+                .cast::<ICompositionDrawingSurfaceInterop>()
+                .unwrap();
+            let mut offset = core::mem::MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.75 }, None) });
+
+                unsafe {
+                    dc.SetDpi(init.dpi, init.dpi);
+                    dc.Clear(None);
+                    dc.DrawTextLayout(
+                        D2D_POINT_2F {
+                            x: signed_pixels_to_dip(offset.x, init.dpi) + 9.0,
+                            y: signed_pixels_to_dip(offset.y, init.dpi) + 9.0,
+                        },
+                        &tl,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
 
         let header = SpriteVisualParams {
             brush: &CompositionSurfaceBrushParams {
@@ -2239,9 +2500,50 @@ impl SpriteListPaneView {
         }
         .instantiate(&init.subsystem.compositor)
         .unwrap();
+        let header_bg = SpriteVisualParams {
+            brush: &create_instant_effect_brush(
+                init.subsystem,
+                &GaussianBlurEffectParams {
+                    source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                    blur_amount: Some(18.0 / 3.0),
+                }
+                .instantiate()
+                .unwrap(),
+                &[(
+                    h!("source"),
+                    CompositionSurfaceBrushParams {
+                        surface: &header_surface_w,
+                        stretch: None,
+                    }
+                    .instantiate(&init.subsystem.compositor)
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                )],
+            )
+            .unwrap(),
+            offset: Some(Vector3 {
+                X: dip_to_pixels(-(tm.width + 18.0) * 0.5, init.dpi),
+                Y: dip_to_pixels(Self::CORNER_RADIUS - 9.0, init.dpi),
+                Z: 0.0,
+            }),
+            relative_offset_adjustment: Some(Vector3 {
+                X: 0.5,
+                Y: 0.0,
+                Z: 0.0,
+            }),
+            size: Some(Vector2 {
+                X: dip_to_pixels(tm.width + 18.0, init.dpi),
+                Y: dip_to_pixels(tm.height + 18.0, init.dpi),
+            }),
+            relative_size_adjustment: None,
+        }
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
 
         let children = root.Children().unwrap();
         children.InsertAtTop(&bg).unwrap();
+        children.InsertAtTop(&header_bg).unwrap();
         children.InsertAtTop(&header).unwrap();
 
         let ht_root = init.ht.alloc(HitTestTreeData {
@@ -2249,7 +2551,7 @@ impl SpriteListPaneView {
             top: 0.0,
             left_adjustment_factor: 0.0,
             top_adjustment_factor: 0.0,
-            width: 192.0,
+            width: Self::INIT_WIDTH,
             height: -Self::SPACING,
             width_adjustment_factor: 0.0,
             height_adjustment_factor: 1.0,
@@ -2278,7 +2580,7 @@ impl SpriteListPaneView {
             ht_adjust_area,
             dpi: init.dpi,
             top: Cell::new(0.0),
-            width: Cell::new(192.0),
+            width: Cell::new(Self::INIT_WIDTH),
         }
     }
 
@@ -2418,6 +2720,17 @@ pub struct SpriteListPanePresenter {
 impl SpriteListPanePresenter {
     pub fn new(init: &mut PresenterInitContext) -> Self {
         let view = Rc::new(SpriteListPaneView::new(&mut init.for_view));
+
+        let cell = SpriteListCellView::new(&mut init.for_view, "example_sprite_1", 32.0);
+        cell.mount(&view.root.Children().unwrap());
+        let cell = SpriteListCellView::new(&mut init.for_view, "example_ui_player_card/bg", 52.0);
+        cell.mount(&view.root.Children().unwrap());
+        let cell = SpriteListCellView::new(
+            &mut init.for_view,
+            "example_ui_player_card/name_underline",
+            72.0,
+        );
+        cell.mount(&view.root.Children().unwrap());
 
         let ht_action_handler = Rc::new(SpriteListPaneHitActionHandler {
             view: view.clone(),
