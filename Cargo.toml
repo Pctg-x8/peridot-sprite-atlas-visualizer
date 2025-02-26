@@ -6,10 +6,12 @@ build = "build.rs"
 
 [dependencies]
 bitflags = "2.8.0"
-windows-core = "0.59"
+windows-core = "*"
+windows-numerics = "*"
+windows-collections = "*"
 
 [dependencies.windows]
-version = "0.59"
+version = "0.60"
 features = [
     "Win32_Storage_Packaging_Appx",
     "Win32_Graphics_CompositionSwapchain",
@@ -29,8 +31,6 @@ features = [
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
-    "Foundation_Collections",
-    "Foundation_Numerics",
     "System",
     "Graphics_Effects",
     "Graphics_DirectX",
@@ -42,8 +42,8 @@ features = [
 ]
 
 [build-dependencies]
-windows-bindgen = "0.59"
+windows-bindgen = "*"
 
 [build-dependencies.windows]
-version = "0.59"
+version = "0.60"
 features = ["Win32_System_Registry"]

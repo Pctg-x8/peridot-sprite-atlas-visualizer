@@ -5,8 +5,10 @@ use core::{
 use std::collections::HashMap;
 use windows::{
     core::{h, implement, w, Interface},
+    Foundation::Size,
+    Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat},
     Win32::{
-        Foundation::{BOOL, HMODULE},
+        Foundation::HMODULE,
         Graphics::{
             CompositionSwapchain::{
                 CreatePresentationFactory, IPresentationFactory, IPresentationManager,
@@ -31,9 +33,9 @@ use windows::{
         },
         System::WinRT::Composition::{ICompositorDesktopInterop, ICompositorInterop},
     },
-    UI::Composition::{CompositionGraphicsDevice, Compositor},
+    UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice, Compositor},
 };
-use windows_core::HSTRING;
+use windows_core::{BOOL, HSTRING};
 
 #[implement(IDWriteFontCollectionLoader)]
 struct AppFontCollectionLoader;
@@ -255,5 +257,16 @@ impl Subsystem {
             presentation_factory,
             presentation_manager,
         }
+    }
+
+    pub fn new_2d_drawing_surface(
+        &self,
+        size: Size,
+    ) -> windows_core::Result<CompositionDrawingSurface> {
+        self.composition_2d_graphics_device.CreateDrawingSurface(
+            size,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            DirectXAlphaMode::Premultiplied,
+        )
     }
 }

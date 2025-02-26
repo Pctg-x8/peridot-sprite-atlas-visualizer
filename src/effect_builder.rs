@@ -11,7 +11,7 @@ pub struct GaussianBlurEffectParams<Source> {
 }
 impl<Source> GaussianBlurEffectParams<Source>
 where
-    Source: windows::core::Param<IGraphicsEffectSource>,
+    Source: windows_core::Param<IGraphicsEffectSource>,
 {
     #[inline]
     pub fn instantiate(self) -> windows::core::Result<GaussianBlurEffect> {

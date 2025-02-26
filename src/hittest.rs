@@ -52,6 +52,15 @@ pub trait HitTestTreeActionHandler {
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
+
+    #[allow(unused_variables)]
+    fn on_click(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+    ) -> EventContinueControl {
+        EventContinueControl::empty()
+    }
 }
 
 pub struct HitTestTreeData {
