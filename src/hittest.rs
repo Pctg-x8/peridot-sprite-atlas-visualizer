@@ -11,12 +11,28 @@ pub trait HitTestTreeActionHandler {
     }
 
     #[allow(unused_variables)]
-    fn on_pointer_enter(&self, sender: HitTestTreeRef) -> EventContinueControl {
+    fn on_pointer_enter(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
+    ) -> EventContinueControl {
         EventContinueControl::empty()
     }
 
     #[allow(unused_variables)]
-    fn on_pointer_leave(&self, sender: HitTestTreeRef) -> EventContinueControl {
+    fn on_pointer_leave(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
+    ) -> EventContinueControl {
         EventContinueControl::empty()
     }
 
@@ -49,6 +65,8 @@ pub trait HitTestTreeActionHandler {
         ht: &mut HitTestTreeContext,
         client_x: f32,
         client_y: f32,
+        client_width: f32,
+        client_height: f32,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -177,6 +195,51 @@ impl HitTestTreeContext {
         }
 
         rec(self, root, 0);
+    }
+
+    pub fn translate_client_to_tree_local(
+        &self,
+        x: HitTestTreeRef,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
+    ) -> (f32, f32, f32, f32) {
+        let e = &self.entities[x.0];
+        match e.parent {
+            None => {
+                // parent = clientなので直接計算する
+                let actual_left = e.left + client_width * e.left_adjustment_factor;
+                let actual_top = e.top + client_height * e.top_adjustment_factor;
+
+                (
+                    client_x - actual_left,
+                    client_y - actual_top,
+                    e.width + client_width * e.width_adjustment_factor,
+                    e.height + client_height * e.height_adjustment_factor,
+                )
+            }
+            Some(p) => {
+                // 親で一回計算して、その中のローカル座標として計算する
+                let (parent_local_x, parent_local_y, parent_actual_width, parent_actual_height) =
+                    self.translate_client_to_tree_local(
+                        p,
+                        client_x,
+                        client_y,
+                        client_width,
+                        client_height,
+                    );
+                let actual_left = e.left + parent_actual_width * e.left_adjustment_factor;
+                let actual_top = e.top + parent_actual_height * e.top_adjustment_factor;
+
+                (
+                    parent_local_x - actual_left,
+                    parent_local_y - actual_top,
+                    e.width + parent_actual_width * e.width_adjustment_factor,
+                    e.height + parent_actual_height * e.height_adjustment_factor,
+                )
+            }
+        }
     }
 
     pub fn perform_test(

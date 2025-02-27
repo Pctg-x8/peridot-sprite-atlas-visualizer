@@ -263,6 +263,8 @@ impl Subsystem {
         &self,
         size: Size,
     ) -> windows_core::Result<CompositionDrawingSurface> {
+        tracing::trace!("gen {}x{} 2d surface", size.Width, size.Height);
+
         self.composition_2d_graphics_device.CreateDrawingSurface(
             size,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,

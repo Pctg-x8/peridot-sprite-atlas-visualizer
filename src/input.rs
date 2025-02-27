@@ -72,7 +72,14 @@ impl PointerInputManager {
                 .get(tr)
                 .action_handler()
                 .map_or(EventContinueControl::empty(), |a| {
-                    a.on_pointer_move(tr, ht, client_x, client_y)
+                    a.on_pointer_move(
+                        tr,
+                        ht,
+                        client_x,
+                        client_y,
+                        client_size.Width,
+                        client_size.Height,
+                    )
                 });
 
             return;
@@ -93,28 +100,46 @@ impl PointerInputManager {
                 let mut p = Some(tr);
                 while let Some(tr) = p {
                     let t = ht.get(tr);
-                    let cont = t
-                        .action_handler()
-                        .map_or(EventContinueControl::empty(), |a| a.on_pointer_leave(tr));
+                    let next = t.parent;
+                    let action_handler = t.action_handler();
+                    let cont = action_handler.map_or(EventContinueControl::empty(), |a| {
+                        a.on_pointer_leave(
+                            tr,
+                            ht,
+                            client_x,
+                            client_y,
+                            client_size.Width,
+                            client_size.Height,
+                        )
+                    });
                     if cont.contains(EventContinueControl::STOP_PROPAGATION) {
                         break;
                     }
 
-                    p = t.parent;
+                    p = next;
                 }
 
                 if let Some(tr) = new_hit {
                     let mut p = Some(tr);
                     while let Some(tr) = p {
                         let t = ht.get(tr);
-                        let cont = t
-                            .action_handler()
-                            .map_or(EventContinueControl::empty(), |a| a.on_pointer_enter(tr));
+                        let next = t.parent;
+                        let action_handler = t.action_handler();
+                        let cont = action_handler.map_or(EventContinueControl::empty(), |a| {
+                            a.on_pointer_enter(
+                                tr,
+                                ht,
+                                client_x,
+                                client_y,
+                                client_size.Width,
+                                client_size.Height,
+                            )
+                        });
                         if cont.contains(EventContinueControl::STOP_PROPAGATION) {
                             break;
                         }
 
-                        p = t.parent;
+                        p = next;
                     }
                 }
             }
@@ -131,7 +156,14 @@ impl PointerInputManager {
             let next = t.parent;
             let action_handler = t.action_handler();
             let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
-                a.on_pointer_move(tr, ht, client_x, client_y)
+                a.on_pointer_move(
+                    tr,
+                    ht,
+                    client_x,
+                    client_y,
+                    client_size.Width,
+                    client_size.Height,
+                )
             });
             if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                 self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);

@@ -233,6 +233,7 @@ impl AppCloseButtonView {
                     GaussianBlurEffectParams {
                         source: &CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap(),
                         blur_amount: Some(9.0 / 3.0),
+                        name: None,
                     }
                     .instantiate()
                     .unwrap()
@@ -494,6 +495,7 @@ impl AppMinimizeButtonView {
                     GaussianBlurEffectParams {
                         source: &CompositionEffectSourceParameter::Create(h!("backdrop")).unwrap(),
                         blur_amount: Some(9.0 / 3.0),
+                        name: None,
                     }
                     .instantiate()
                     .unwrap()

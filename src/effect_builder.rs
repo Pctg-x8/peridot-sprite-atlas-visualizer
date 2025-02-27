@@ -1,15 +1,17 @@
 use windows::Graphics::Effects::IGraphicsEffectSource;
+use windows_core::HSTRING;
 
 use crate::extra_bindings::Microsoft::Graphics::Canvas::{
     CanvasComposite,
     Effects::{ColorSourceEffect, CompositeEffect, GaussianBlurEffect},
 };
 
-pub struct GaussianBlurEffectParams<Source> {
+pub struct GaussianBlurEffectParams<'s, Source> {
     pub source: Source,
     pub blur_amount: Option<f32>,
+    pub name: Option<&'s HSTRING>,
 }
-impl<Source> GaussianBlurEffectParams<Source>
+impl<'s, Source> GaussianBlurEffectParams<'s, Source>
 where
     Source: windows_core::Param<IGraphicsEffectSource>,
 {
@@ -19,6 +21,9 @@ where
         x.SetSource(self.source)?;
         if let Some(p) = self.blur_amount {
             x.SetBlurAmount(p)?;
+        }
+        if let Some(p) = self.name {
+            x.SetName(p)?;
         }
 
         Ok(x)

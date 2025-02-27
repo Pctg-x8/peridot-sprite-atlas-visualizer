@@ -1,8 +1,13 @@
-use windows::UI::Composition::{
-    CompositionBrush, CompositionColorGradientStop, CompositionLinearGradientBrush,
-    CompositionMaskBrush, CompositionNineGridBrush, CompositionStretch, CompositionSurfaceBrush,
-    Compositor, ContainerVisual, ICompositionSurface, SpriteVisual,
+use windows::{
+    Foundation::TimeSpan,
+    UI::Composition::{
+        CompositionBrush, CompositionColorGradientStop, CompositionEasingFunction,
+        CompositionLinearGradientBrush, CompositionMaskBrush, CompositionNineGridBrush,
+        CompositionStretch, CompositionSurfaceBrush, Compositor, ContainerVisual,
+        ICompositionSurface, ScalarKeyFrameAnimation, SpriteVisual,
+    },
 };
+use windows_core::HSTRING;
 use windows_numerics::{Vector2, Vector3};
 
 pub struct CompositionColorGradientStopParams {
@@ -371,6 +376,58 @@ where
         }
         if let Some(p) = self.anchor_point {
             x.SetAnchorPoint(p)?;
+        }
+
+        Ok(x)
+    }
+}
+
+pub struct SimpleScalarAnimationParams<'s, Easing> {
+    pub start_value: f32,
+    pub end_value: f32,
+    pub easing: Easing,
+    pub duration: Option<TimeSpan>,
+    pub target: Option<&'s HSTRING>,
+}
+impl<'s, Easing> SimpleScalarAnimationParams<'s, Easing> {
+    pub const fn new(start_value: f32, end_value: f32, easing: Easing) -> Self {
+        Self {
+            start_value,
+            end_value,
+            easing,
+            duration: None,
+            target: None,
+        }
+    }
+
+    pub const fn duration(mut self, d: TimeSpan) -> Self {
+        self.duration = Some(d);
+        self
+    }
+
+    pub const fn target(mut self, target: &'s HSTRING) -> Self {
+        self.target = Some(target);
+        self
+    }
+}
+impl<Easing> SimpleScalarAnimationParams<'_, Easing>
+where
+    Easing: windows_core::Param<CompositionEasingFunction>,
+{
+    #[inline]
+    pub fn instantiate(
+        self,
+        compositor: &Compositor,
+    ) -> windows_core::Result<ScalarKeyFrameAnimation> {
+        let x = compositor.CreateScalarKeyFrameAnimation()?;
+        x.InsertKeyFrame(0.0, self.start_value)?;
+        x.InsertKeyFrameWithEasingFunction(1.0, self.end_value, self.easing)?;
+
+        if let Some(p) = self.duration {
+            x.SetDuration(p)?;
+        }
+        if let Some(p) = self.target {
+            x.SetTarget(p)?;
         }
 
         Ok(x)

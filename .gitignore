@@ -3,3 +3,4 @@
 /.nuget
 *.fxc
 *.ttc
+/local

@@ -1,19 +1,31 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    ffi::OsString,
+    os::windows::ffi::OsStringExt,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use component::app_header::AppHeaderView;
 use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
-    ContainerVisualParams, SpriteVisualParams,
+    ContainerVisualParams, SimpleScalarAnimationParams, SpriteVisualParams,
 };
 use effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams};
+use extra_bindings::Microsoft::Graphics::Canvas::{
+    CanvasComposite,
+    Effects::{CompositeEffect, GaussianBlurEffect},
+};
 use hittest::HitTestTreeActionHandler;
 use subsystem::Subsystem;
+use tracing::instrument::WithSubscriber;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use windows::{
     core::{h, w, Interface, HRESULT, PCWSTR},
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
+        Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
         Graphics::{
             Direct2D::{
                 Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_RECT_F},
@@ -27,7 +39,10 @@ use windows::{
                 D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
                 D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
             },
-            DirectWrite::{IDWriteTextLayout1, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_RANGE},
+            DirectWrite::{
+                IDWriteTextLayout1, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_LIGHT,
+                DWRITE_TEXT_RANGE,
+            },
             Dwm::{
                 DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
             },
@@ -42,7 +57,16 @@ use windows::{
         },
         Storage::Packaging::Appx::PACKAGE_VERSION,
         System::{
+            Com::{
+                CoCreateInstance, CLSCTX_INPROC_SERVER, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
+                STGMEDIUM, TYMED_HGLOBAL,
+            },
             LibraryLoader::GetModuleHandleW,
+            Memory::{GlobalLock, GlobalUnlock},
+            Ole::{
+                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
+                RevokeDragDrop, CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_LINK,
+            },
             Threading::INFINITE,
             WinRT::{
                 Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
@@ -52,6 +76,9 @@ use windows::{
         UI::{
             Controls::MARGINS,
             HiDpi::GetDpiForWindow,
+            Shell::{
+                CLSID_DragDropHelper, DragAcceptFiles, DragQueryFileW, IDropTargetHelper, HDROP,
+            },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetSystemMetrics,
                 GetWindowLongPtrW, GetWindowRect, LoadCursorW, LoadIconW,
@@ -78,7 +105,7 @@ use windows::{
         },
     },
 };
-use windows_core::{BOOL, HSTRING};
+use windows_core::{implement, BOOL, HSTRING};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 mod component;
@@ -87,6 +114,7 @@ mod effect_builder;
 mod extra_bindings;
 mod hittest;
 mod input;
+mod source_reader;
 mod subsystem;
 
 use crate::hittest::*;
@@ -226,6 +254,19 @@ const fn rgb_color_from_websafe_hex(hex: u16) -> Color {
     }
 }
 
+const fn d2d1_color_f_from_rgb_hex(hex: u32) -> D2D1_COLOR_F {
+    let ru = ((hex >> 16) & 0xff) as u8;
+    let gu = ((hex >> 8) & 0xff) as u8;
+    let bu = (hex & 0xff) as u8;
+
+    D2D1_COLOR_F {
+        r: ru as f32 / 255.0,
+        g: gu as f32 / 255.0,
+        b: bu as f32 / 255.0,
+        a: 1.0,
+    }
+}
+
 const BG_COLOR: Color = rgb_color_from_hex(0x202030);
 
 pub trait DpiHandler {
@@ -236,10 +277,11 @@ pub trait DpiHandler {
 pub struct PresenterInitContext<'r> {
     pub for_view: ViewInitContext<'r>,
     pub dpi_handlers: &'r mut Vec<std::rc::Weak<dyn DpiHandler>>,
+    pub app_state: &'r Rc<RefCell<AppState>>,
 }
 pub struct ViewInitContext<'r> {
-    pub subsystem: &'r Subsystem,
-    pub ht: &'r mut HitTestTreeContext,
+    pub subsystem: &'r Rc<Subsystem>,
+    pub ht: &'r Rc<RefCell<HitTestTreeContext>>,
     pub dpi: f32,
 }
 impl ViewInitContext<'_> {
@@ -861,7 +903,7 @@ impl SpriteListToggleButtonView {
         root.SetImplicitAnimations(&root_implicit_animations)
             .unwrap();
 
-        let ht_root = init.ht.alloc(HitTestTreeData {
+        let ht_root = init.ht.borrow_mut().alloc(HitTestTreeData {
             left: -Self::BUTTON_SIZE - 8.0,
             top: 8.0,
             left_adjustment_factor: 1.0,
@@ -974,7 +1016,10 @@ impl SpriteListToggleButtonView {
 
 pub struct SpriteListCellView {
     root: ContainerVisual,
+    bg: SpriteVisual,
+    label: SpriteVisual,
     top: Cell<f32>,
+    dpi: Cell<f32>,
 }
 impl SpriteListCellView {
     const FRAME_TEX_SIZE: f32 = 24.0;
@@ -1101,12 +1146,15 @@ impl SpriteListCellView {
 
         let root = ContainerVisualParams::new()
             .size(Vector2 {
-                X: init.dip_to_pixels(-32.0),
+                X: init.dip_to_pixels(
+                    -SpriteListPaneView::CELL_AREA_PADDINGS.right
+                        - SpriteListPaneView::CELL_AREA_PADDINGS.left,
+                ),
                 Y: init.dip_to_pixels(Self::CELL_HEIGHT),
             })
             .expand_width()
             .offset_xy(Vector2 {
-                X: init.dip_to_pixels(16.0),
+                X: init.dip_to_pixels(SpriteListPaneView::CELL_AREA_PADDINGS.left),
                 Y: init.dip_to_pixels(init_top),
             })
             .instantiate(&init.subsystem.compositor)
@@ -1123,6 +1171,7 @@ impl SpriteListCellView {
             .unwrap(),
         )
         .expand()
+        .opacity(0.0)
         .instantiate(&init.subsystem.compositor)
         .unwrap();
         let label = SpriteVisualParams::new(
@@ -1146,9 +1195,47 @@ impl SpriteListCellView {
         children.InsertAtTop(&bg).unwrap();
         children.InsertAtTop(&label).unwrap();
 
+        let opacity_transition = init
+            .subsystem
+            .compositor
+            .CreateScalarKeyFrameAnimation()
+            .unwrap();
+        opacity_transition
+            .InsertExpressionKeyFrame(0.0, h!("this.StartingValue"))
+            .unwrap();
+        opacity_transition
+            .InsertExpressionKeyFrameWithEasingFunction(
+                1.0,
+                h!("this.FinalValue"),
+                &init
+                    .subsystem
+                    .compositor
+                    .CreateCubicBezierEasingFunction(
+                        Vector2 { X: 0.5, Y: 0.0 },
+                        Vector2 { X: 0.5, Y: 1.0 },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        opacity_transition.SetDuration(timespan_ms(150)).unwrap();
+        opacity_transition.SetTarget(h!("Opacity")).unwrap();
+
+        let bg_implicit_animations = init
+            .subsystem
+            .compositor
+            .CreateImplicitAnimationCollection()
+            .unwrap();
+        bg_implicit_animations
+            .Insert(h!("Opacity"), &opacity_transition)
+            .unwrap();
+        bg.SetImplicitAnimations(&bg_implicit_animations).unwrap();
+
         Self {
             root,
+            bg,
+            label,
             top: Cell::new(init_top),
+            dpi: Cell::new(init.dpi),
         }
     }
 
@@ -1165,12 +1252,113 @@ impl SpriteListCellView {
             .Remove(&self.root)
             .unwrap();
     }
+
+    pub fn on_hover(&self) {
+        self.bg.SetOpacity(0.5).unwrap();
+    }
+
+    pub fn on_leave(&self) {
+        self.bg.SetOpacity(0.0).unwrap();
+    }
+
+    pub fn set_top(&self, top: f32) {
+        let dpi = self.dpi.get();
+
+        self.root
+            .SetOffset(Vector3 {
+                X: dip_to_pixels(SpriteListPaneView::CELL_AREA_PADDINGS.left, dpi),
+                Y: dip_to_pixels(top, dpi),
+                Z: 0.0,
+            })
+            .unwrap();
+        self.top.set(top);
+    }
+
+    pub fn set_name(&self, name: &str, subsystem: &Subsystem) {
+        let dpi = self.dpi.get();
+
+        let tl = unsafe {
+            subsystem
+                .dwrite_factory
+                .CreateTextLayout(
+                    &name.encode_utf16().collect::<Vec<_>>(),
+                    &subsystem.default_ui_format,
+                    f32::MAX,
+                    f32::MAX,
+                )
+                .unwrap()
+        };
+        let mut tm = core::mem::MaybeUninit::uninit();
+        unsafe {
+            tl.GetMetrics(tm.as_mut_ptr()).unwrap();
+        }
+        let tm = unsafe { tm.assume_init() };
+        let label_surface = subsystem
+            .new_2d_drawing_surface(Size {
+                Width: dip_to_pixels(tm.width, dpi),
+                Height: dip_to_pixels(tm.height, dpi),
+            })
+            .unwrap();
+        {
+            let interop = label_surface
+                .cast::<ICompositionDrawingSurfaceInterop>()
+                .unwrap();
+            let mut offset = core::mem::MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                unsafe {
+                    dc.SetDpi(dpi, dpi);
+                }
+
+                let brush = scoped_try!(
+                    'drawing,
+                    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, None) }
+                );
+
+                unsafe {
+                    dc.Clear(None);
+                    dc.DrawTextLayout(
+                        D2D_POINT_2F {
+                            x: signed_pixels_to_dip(offset.x, dpi),
+                            y: signed_pixels_to_dip(offset.y, dpi),
+                        },
+                        &tl,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
+
+        self.label
+            .SetBrush(
+                &CompositionSurfaceBrushParams::new(&label_surface)
+                    .instantiate(&subsystem.compositor)
+                    .unwrap(),
+            )
+            .unwrap();
+        self.label
+            .SetSize(Vector2 {
+                X: dip_to_pixels(tm.width, dpi),
+                Y: dip_to_pixels(tm.height, dpi),
+            })
+            .unwrap();
+    }
 }
 
 pub struct SpriteListPaneView {
     root: ContainerVisual,
     ht_root: HitTestTreeRef,
     ht_adjust_area: HitTestTreeRef,
+    ht_cell_area: HitTestTreeRef,
     composition_properties: CompositionPropertySet,
     hide_animation: ScalarKeyFrameAnimation,
     show_animation: ScalarKeyFrameAnimation,
@@ -1204,6 +1392,12 @@ impl SpriteListPaneView {
         a: 1.0,
     };
     const TRANSITION_DURATION: TimeSpan = timespan_ms(250);
+    const CELL_AREA_PADDINGS: RectDIP = RectDIP {
+        left: 16.0,
+        top: 32.0,
+        right: 16.0,
+        bottom: 16.0,
+    };
 
     fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
         let s = subsystem
@@ -1272,6 +1466,7 @@ impl SpriteListPaneView {
                     GaussianBlurEffectParams {
                         source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
                         blur_amount: Some(Self::BLUR_AMOUNT / 3.0),
+                        name: None,
                     }
                     .instantiate()
                     .unwrap()
@@ -1472,6 +1667,7 @@ impl SpriteListPaneView {
                 &GaussianBlurEffectParams {
                     source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
                     blur_amount: Some(18.0 / 3.0),
+                    name: None,
                 }
                 .instantiate()
                 .unwrap(),
@@ -1521,7 +1717,6 @@ impl SpriteListPaneView {
             .unwrap();
 
         let offset_expr = format!("Vector3(-this.Target.Size.X - ({spc} * compositionProperties.DPI / 96.0) + (this.Target.Size.X + ({spc} * 2.0 * compositionProperties.DPI / 96.0)) * compositionProperties.ShownRate, compositionProperties.TopOffset * compositionProperties.DPI / 96.0, 0.0)", spc = Self::SPACING);
-        println!("offset_expr: {offset_expr:?}");
         let root_offset = init
             .subsystem
             .compositor
@@ -1538,32 +1733,16 @@ impl SpriteListPaneView {
             0.1,
         )
         .unwrap();
-        let hide_animation = init
-            .subsystem
-            .compositor
-            .CreateScalarKeyFrameAnimation()
+        let hide_animation = SimpleScalarAnimationParams::new(1.0, 0.0, &easing)
+            .duration(Self::TRANSITION_DURATION)
+            .instantiate(&init.subsystem.compositor)
             .unwrap();
-        hide_animation.InsertKeyFrame(0.0, 1.0).unwrap();
-        hide_animation
-            .InsertKeyFrameWithEasingFunction(1.0, 0.0, &easing)
-            .unwrap();
-        hide_animation
-            .SetDuration(Self::TRANSITION_DURATION)
-            .unwrap();
-        let show_animation = init
-            .subsystem
-            .compositor
-            .CreateScalarKeyFrameAnimation()
-            .unwrap();
-        show_animation.InsertKeyFrame(0.0, 0.0).unwrap();
-        show_animation
-            .InsertKeyFrameWithEasingFunction(1.0, 1.0, &easing)
-            .unwrap();
-        show_animation
-            .SetDuration(Self::TRANSITION_DURATION)
+        let show_animation = SimpleScalarAnimationParams::new(0.0, 1.0, &easing)
+            .duration(Self::TRANSITION_DURATION)
+            .instantiate(&init.subsystem.compositor)
             .unwrap();
 
-        let ht_root = init.ht.alloc(HitTestTreeData {
+        let ht_root = init.ht.borrow_mut().alloc(HitTestTreeData {
             left: Self::SPACING,
             top: 0.0,
             left_adjustment_factor: 0.0,
@@ -1576,7 +1755,7 @@ impl SpriteListPaneView {
             children: Vec::new(),
             action_handler: None,
         });
-        let ht_adjust_area = init.ht.alloc(HitTestTreeData {
+        let ht_adjust_area = init.ht.borrow_mut().alloc(HitTestTreeData {
             left: -Self::ADJUST_AREA_THICKNESS * 0.5,
             top: 0.0,
             left_adjustment_factor: 1.0,
@@ -1589,12 +1768,27 @@ impl SpriteListPaneView {
             children: Vec::new(),
             action_handler: None,
         });
-        init.ht.add_child(ht_root, ht_adjust_area);
+        let ht_cell_area = init.ht.borrow_mut().alloc(HitTestTreeData {
+            left: Self::CELL_AREA_PADDINGS.left,
+            top: Self::CELL_AREA_PADDINGS.top,
+            left_adjustment_factor: 0.0,
+            top_adjustment_factor: 0.0,
+            width: -Self::CELL_AREA_PADDINGS.right - Self::CELL_AREA_PADDINGS.left,
+            height: -Self::CELL_AREA_PADDINGS.bottom - Self::CELL_AREA_PADDINGS.top,
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            parent: None,
+            children: Vec::new(),
+            action_handler: None,
+        });
+        init.ht.borrow_mut().add_child(ht_root, ht_cell_area);
+        init.ht.borrow_mut().add_child(ht_root, ht_adjust_area);
 
         Self {
             root,
             ht_root,
             ht_adjust_area,
+            ht_cell_area,
             composition_properties,
             hide_animation,
             show_animation,
@@ -1677,6 +1871,8 @@ impl SpriteListPaneView {
 pub struct SpriteListPaneHitActionHandler {
     pub view: Rc<SpriteListPaneView>,
     pub toggle_button_view: Rc<SpriteListToggleButtonView>,
+    pub cell_views: Rc<RefCell<Vec<SpriteListCellView>>>,
+    pub active_cell_index: Cell<Option<usize>>,
     pub hidden: Cell<bool>,
     adjust_drag_state: Cell<Option<(f32, f32)>>,
 }
@@ -1690,9 +1886,38 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         None
     }
 
-    fn on_pointer_enter(&self, sender: HitTestTreeRef) -> EventContinueControl {
+    fn on_pointer_enter(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
+    ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view.on_hover();
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.view.ht_cell_area {
+            let (_, local_y, _, _) = ht.translate_client_to_tree_local(
+                sender,
+                client_x,
+                client_y,
+                client_width,
+                client_height,
+            );
+
+            let index = (local_y / SpriteListCellView::CELL_HEIGHT).trunc();
+            if 0.0 <= index && index < self.cell_views.borrow().len() as f32 {
+                let index = index as usize;
+                self.cell_views.borrow()[index].on_hover();
+                self.active_cell_index.set(Some(index));
+            } else {
+                self.active_cell_index.set(None);
+            }
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1700,9 +1925,25 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         EventContinueControl::empty()
     }
 
-    fn on_pointer_leave(&self, sender: HitTestTreeRef) -> EventContinueControl {
+    fn on_pointer_leave(
+        &self,
+        sender: HitTestTreeRef,
+        _ht: &mut HitTestTreeContext,
+        _client_x: f32,
+        _client_y: f32,
+        _client_width: f32,
+        _client_height: f32,
+    ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view.on_hover_leave();
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.view.ht_cell_area {
+            if let Some(x) = self.active_cell_index.replace(None) {
+                self.cell_views.borrow()[x].on_leave();
+            }
 
             return EventContinueControl::STOP_PROPAGATION;
         }
@@ -1738,12 +1979,45 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         ht: &mut HitTestTreeContext,
         client_x: f32,
-        _client_y: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
     ) -> EventContinueControl {
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             if let Some((base_x, base_width)) = self.adjust_drag_state.get() {
                 let new_width = (base_width + (client_x - base_x)).max(10.0);
                 self.view.set_width(ht, new_width);
+            }
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.view.ht_cell_area {
+            let (_, local_y, _, _) = ht.translate_client_to_tree_local(
+                sender,
+                client_x,
+                client_y,
+                client_width,
+                client_height,
+            );
+
+            let new_index = (local_y / SpriteListCellView::CELL_HEIGHT).trunc();
+            let new_index = if 0.0 <= new_index && new_index < self.cell_views.borrow().len() as f32
+            {
+                Some(new_index as usize)
+            } else {
+                None
+            };
+
+            if self.active_cell_index.get() != new_index {
+                // active changed
+                if let Some(n) = self.active_cell_index.replace(new_index) {
+                    self.cell_views.borrow()[n].on_leave();
+                }
+
+                if let Some(n) = new_index {
+                    self.cell_views.borrow()[n].on_hover();
+                }
             }
 
             return EventContinueControl::STOP_PROPAGATION;
@@ -1803,49 +2077,109 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     }
 }
 
+// TODO: CellViewのプールがすでにArenaになっているので、あとでそれ前提で組み直したい
+
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
-    toggle_button_view: Rc<SpriteListToggleButtonView>,
     _ht_action_handler: Rc<SpriteListPaneHitActionHandler>,
 }
 impl SpriteListPanePresenter {
     pub fn new(init: &mut PresenterInitContext) -> Self {
         let view = Rc::new(SpriteListPaneView::new(&mut init.for_view));
         let toggle_button_view = Rc::new(SpriteListToggleButtonView::new(&mut init.for_view));
-
-        let cell = SpriteListCellView::new(&mut init.for_view, "example_sprite_1", 32.0);
-        cell.mount(&view.root.Children().unwrap());
-        let cell = SpriteListCellView::new(&mut init.for_view, "example_ui_player_card/bg", 52.0);
-        cell.mount(&view.root.Children().unwrap());
-        let cell = SpriteListCellView::new(
-            &mut init.for_view,
-            "example_ui_player_card/name_underline",
-            72.0,
-        );
-        cell.mount(&view.root.Children().unwrap());
+        let mut sprite_list_contents = Vec::new();
+        let sprite_list_cells = Rc::new(RefCell::new(Vec::new()));
 
         toggle_button_view.mount(
             &view.root.Children().unwrap(),
-            init.for_view.ht,
+            &mut init.for_view.ht.borrow_mut(),
             view.ht_root,
         );
+
+        init.app_state
+            .borrow_mut()
+            .sprites_update_callbacks
+            .push(Box::new({
+                let subsystem = Rc::downgrade(init.for_view.subsystem);
+                let ht = Rc::downgrade(init.for_view.ht);
+                let view = Rc::downgrade(&view);
+                let sprite_list_cells = Rc::downgrade(&sprite_list_cells);
+
+                move |sprites| {
+                    let Some(subsystem) = subsystem.upgrade() else {
+                        // app teardown-ed
+                        return;
+                    };
+                    let Some(ht) = ht.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+                    let Some(view) = view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+                    let Some(sprite_list_cells) = sprite_list_cells.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+
+                    tracing::info!("sprites updated: {sprites:?}");
+                    sprite_list_contents.clear();
+                    sprite_list_contents.extend(sprites.iter().map(|x| x.name.clone()));
+                    let visible_contents = &sprite_list_contents[..];
+                    for (n, c) in visible_contents.iter().enumerate() {
+                        if sprite_list_cells.borrow().len() == n {
+                            // create new one
+                            let new_cell = SpriteListCellView::new(
+                                &mut ViewInitContext {
+                                    subsystem: &subsystem,
+                                    ht: &ht,
+                                    dpi: view.dpi,
+                                },
+                                &c,
+                                SpriteListPaneView::CELL_AREA_PADDINGS.top
+                                    + n as f32 * SpriteListCellView::CELL_HEIGHT,
+                            );
+                            new_cell.mount(&view.root.Children().unwrap());
+                            sprite_list_cells.borrow_mut().push(new_cell);
+                            continue;
+                        }
+
+                        sprite_list_cells.borrow()[n].set_name(&c, &subsystem);
+                        sprite_list_cells.borrow()[n].set_top(
+                            SpriteListPaneView::CELL_AREA_PADDINGS.top
+                                + n as f32 * SpriteListCellView::CELL_HEIGHT,
+                        );
+                    }
+                }
+            }));
 
         let ht_action_handler = Rc::new(SpriteListPaneHitActionHandler {
             view: view.clone(),
             toggle_button_view: toggle_button_view.clone(),
+            cell_views: sprite_list_cells,
+            active_cell_index: Cell::new(None),
             hidden: Cell::new(false),
             adjust_drag_state: Cell::new(None),
         });
-        init.for_view.ht.get_mut(view.ht_adjust_area).action_handler =
-            Some(Rc::downgrade(&ht_action_handler) as _);
         init.for_view
             .ht
+            .borrow_mut()
+            .get_mut(view.ht_adjust_area)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+        init.for_view
+            .ht
+            .borrow_mut()
+            .get_mut(view.ht_cell_area)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+        init.for_view
+            .ht
+            .borrow_mut()
             .get_mut(toggle_button_view.ht_root)
             .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
 
         Self {
             view,
-            toggle_button_view,
             _ht_action_handler: ht_action_handler,
         }
     }
@@ -1872,8 +2206,235 @@ impl SpriteListPanePresenter {
     }
 }
 
+pub struct FileDragAndDropOverlayView {
+    root: SpriteVisual,
+    composition_params: CompositionPropertySet,
+    show_animation: ScalarKeyFrameAnimation,
+    hide_animation: ScalarKeyFrameAnimation,
+}
+impl FileDragAndDropOverlayView {
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let composite_effect = CompositeEffectParams {
+            sources: &[
+                GaussianBlurEffectParams {
+                    source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                    blur_amount: None,
+                    name: Some(h!("Blur")),
+                }
+                .instantiate()
+                .unwrap()
+                .cast()
+                .unwrap(),
+                ColorSourceEffectParams {
+                    color: Some(windows::UI::Color {
+                        R: 255,
+                        G: 255,
+                        B: 255,
+                        A: 64,
+                    }),
+                }
+                .instantiate()
+                .unwrap()
+                .cast()
+                .unwrap(),
+            ],
+            mode: Some(CanvasComposite::SourceOver),
+        }
+        .instantiate()
+        .unwrap();
+        let effect_factory = init
+            .subsystem
+            .compositor
+            .CreateEffectFactoryWithProperties(
+                &composite_effect,
+                &windows_collections::IIterable::<HSTRING>::from(vec![
+                    h!("Blur.BlurAmount").clone()
+                ]),
+            )
+            .unwrap();
+
+        let bg_brush = effect_factory.CreateBrush().unwrap();
+        bg_brush
+            .SetSourceParameter(
+                h!("source"),
+                &init.subsystem.compositor.CreateBackdropBrush().unwrap(),
+            )
+            .unwrap();
+        let root = SpriteVisualParams::new(&bg_brush)
+            .expand()
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+
+        let label_text_utf16 = "ドロップしてファイルを追加"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let label = unsafe {
+            init.subsystem
+                .dwrite_factory
+                .CreateTextLayout(
+                    &label_text_utf16,
+                    &init.subsystem.default_ui_format,
+                    f32::MAX,
+                    f32::MAX,
+                )
+                .unwrap()
+        };
+        unsafe {
+            label
+                .SetFontSize(
+                    96.0,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: 0,
+                        length: label_text_utf16.len() as _,
+                    },
+                )
+                .unwrap();
+            label
+                .SetFontWeight(
+                    DWRITE_FONT_WEIGHT_SEMI_LIGHT,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: 0,
+                        length: label_text_utf16.len() as _,
+                    },
+                )
+                .unwrap();
+        }
+        let mut metrics = core::mem::MaybeUninit::uninit();
+        unsafe {
+            label.GetMetrics(metrics.as_mut_ptr()).unwrap();
+        }
+        let metrics = unsafe { metrics.assume_init() };
+        let label_surface = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: init.dip_to_pixels(metrics.width),
+                Height: init.dip_to_pixels(metrics.height),
+            })
+            .unwrap();
+        {
+            let interop: ICompositionDrawingSurfaceInterop = label_surface.cast().unwrap();
+            let mut offset = core::mem::MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                unsafe {
+                    dc.SetDpi(init.dpi, init.dpi);
+                }
+
+                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&d2d1_color_f_from_rgb_hex(0xcccccc), None) });
+
+                unsafe {
+                    dc.Clear(None);
+                    dc.DrawTextLayout(
+                        D2D_POINT_2F {
+                            x: init.signed_pixels_to_dip(offset.x),
+                            y: init.signed_pixels_to_dip(offset.y),
+                        },
+                        &label,
+                        &brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
+        let label = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&label_surface)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .size(Vector2 {
+            X: init.dip_to_pixels(metrics.width),
+            Y: init.dip_to_pixels(metrics.height),
+        })
+        .anchor_point(Vector2 { X: 0.5, Y: 0.5 })
+        .relative_offset_adjustment_xy(Vector2 { X: 0.5, Y: 0.5 })
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        root.Children().unwrap().InsertAtTop(&label).unwrap();
+
+        let composition_params = init.subsystem.compositor.CreatePropertySet().unwrap();
+        composition_params.InsertScalar(h!("Rate"), 0.0).unwrap();
+
+        let bg_blur_expression = init
+            .subsystem
+            .compositor
+            .CreateExpressionAnimationWithExpression(h!("cp.Rate * 63.0 / 3.0"))
+            .unwrap();
+        bg_blur_expression
+            .SetExpressionReferenceParameter(h!("cp"), &composition_params)
+            .unwrap();
+        bg_brush
+            .Properties()
+            .unwrap()
+            .InsertScalar(h!("Blur.BlurAmount"), 0.0)
+            .unwrap();
+        bg_brush
+            .Properties()
+            .unwrap()
+            .StartAnimation(h!("Blur.BlurAmount"), &bg_blur_expression)
+            .unwrap();
+
+        let opacity_expression = init
+            .subsystem
+            .compositor
+            .CreateExpressionAnimationWithExpression(h!("cp.Rate"))
+            .unwrap();
+        opacity_expression
+            .SetExpressionReferenceParameter(h!("cp"), &composition_params)
+            .unwrap();
+        root.SetOpacity(0.0).unwrap();
+        root.StartAnimation(h!("Opacity"), &opacity_expression)
+            .unwrap();
+
+        let easing = init
+            .subsystem
+            .compositor
+            .CreateCubicBezierEasingFunction(Vector2 { X: 0.5, Y: 0.0 }, Vector2 { X: 0.5, Y: 1.0 })
+            .unwrap();
+        let show_animation = SimpleScalarAnimationParams::new(0.0, 1.0, &easing)
+            .duration(timespan_ms(200))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let hide_animation = SimpleScalarAnimationParams::new(1.0, 0.0, &easing)
+            .duration(timespan_ms(200))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+
+        Self {
+            root,
+            composition_params,
+            show_animation,
+            hide_animation,
+        }
+    }
+
+    pub fn mount(&self, children: &VisualCollection) {
+        children.InsertAtTop(&self.root).unwrap();
+    }
+
+    pub fn show(&self) {
+        self.composition_params
+            .StartAnimation(h!("Rate"), &self.show_animation)
+            .unwrap();
+    }
+
+    pub fn hide(&self) {
+        self.composition_params
+            .StartAnimation(h!("Rate"), &self.hide_animation)
+            .unwrap();
+    }
+}
+
 struct AppWindowStateModel {
-    ht: HitTestTreeContext,
+    ht: Rc<RefCell<HitTestTreeContext>>,
     ht_root: HitTestTreeRef,
     client_size_pixels: SizePixels,
     dpi: f32,
@@ -1884,9 +2445,14 @@ struct AppWindowStateModel {
     header_view: AppHeaderView,
     grid_view: AtlasBaseGridView,
     sprite_list_pane: SpriteListPanePresenter,
+    file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
 }
 impl AppWindowStateModel {
-    pub fn new(subsystem: &Subsystem, bound_hwnd: HWND) -> Self {
+    pub fn new(
+        subsystem: &Rc<Subsystem>,
+        bound_hwnd: HWND,
+        app_state: &Rc<RefCell<AppState>>,
+    ) -> Self {
         let mut ht = HitTestTreeContext::new();
         let ht_root = ht.alloc(HitTestTreeData {
             left: 0.0,
@@ -1951,13 +2517,15 @@ impl AppWindowStateModel {
             .InsertAtBottom(&bg)
             .expect("Failed to insert bg");
 
+        let ht = Rc::new(RefCell::new(ht));
         let mut presenter_init_context = PresenterInitContext {
             for_view: ViewInitContext {
                 subsystem,
-                ht: &mut ht,
+                ht: &ht,
                 dpi,
             },
             dpi_handlers: &mut dpi_handlers,
+            app_state,
         };
 
         let grid_view = AtlasBaseGridView::new(&mut presenter_init_context.for_view, 128, 128);
@@ -1967,7 +2535,7 @@ impl AppWindowStateModel {
         let sprite_list_pane = SpriteListPanePresenter::new(&mut presenter_init_context);
         sprite_list_pane.mount(
             &composition_root.Children().unwrap(),
-            &mut presenter_init_context.for_view.ht,
+            &mut presenter_init_context.for_view.ht.borrow_mut(),
             ht_root,
         );
 
@@ -1977,9 +2545,14 @@ impl AppWindowStateModel {
         );
         header_view.mount(&composition_root.Children().unwrap());
 
-        sprite_list_pane.set_top(&mut ht, header_view.height());
+        let file_dnd_overlay = Rc::new(FileDragAndDropOverlayView::new(
+            &mut presenter_init_context.for_view,
+        ));
+        file_dnd_overlay.mount(&composition_root.Children().unwrap());
 
-        ht.dump(ht_root);
+        sprite_list_pane.set_top(&mut ht.borrow_mut(), header_view.height());
+
+        ht.borrow().dump(ht_root);
 
         Self {
             ht,
@@ -1993,11 +2566,12 @@ impl AppWindowStateModel {
             header_view,
             grid_view,
             sprite_list_pane,
+            file_dnd_overlay,
         }
     }
 
     pub fn shutdown(&mut self) {
-        self.sprite_list_pane.shutdown(&mut self.ht);
+        self.sprite_list_pane.shutdown(&mut self.ht.borrow_mut());
     }
 
     pub fn client_size_dip(&self) -> Size {
@@ -2065,7 +2639,7 @@ impl AppWindowStateModel {
 
     pub fn on_mouse_move(&mut self, x_pixels: i16, y_pixels: i16) {
         self.pointer_input_manager.on_mouse_move(
-            &mut self.ht,
+            &mut self.ht.borrow_mut(),
             self.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
@@ -2073,7 +2647,7 @@ impl AppWindowStateModel {
         );
 
         // WM_SETCURSORが飛ばないことがあるのでここで設定する
-        if let Some(c) = self.pointer_input_manager.cursor(&self.ht) {
+        if let Some(c) = self.pointer_input_manager.cursor(&self.ht.borrow()) {
             unsafe {
                 SetCursor(Some(c));
             }
@@ -2083,7 +2657,7 @@ impl AppWindowStateModel {
     pub fn on_mouse_left_down(&mut self, hwnd: HWND, x_pixels: i16, y_pixels: i16) {
         self.pointer_input_manager.on_mouse_left_down(
             hwnd,
-            &mut self.ht,
+            &mut self.ht.borrow_mut(),
             self.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
@@ -2094,7 +2668,7 @@ impl AppWindowStateModel {
     pub fn on_mouse_left_up(&mut self, hwnd: HWND, x_pixels: i16, y_pixels: i16) {
         self.pointer_input_manager.on_mouse_left_up(
             hwnd,
-            &mut self.ht,
+            &mut self.ht.borrow_mut(),
             self.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
@@ -2103,7 +2677,7 @@ impl AppWindowStateModel {
     }
 
     pub fn handle_set_cursor(&mut self) -> bool {
-        if let Some(c) = self.pointer_input_manager.cursor(&self.ht) {
+        if let Some(c) = self.pointer_input_manager.cursor(&self.ht.borrow()) {
             unsafe {
                 SetCursor(Some(c));
             }
@@ -2115,7 +2689,238 @@ impl AppWindowStateModel {
     }
 }
 
+#[implement(IDropTarget)]
+pub struct DropTargetHandler {
+    pub bound_hwnd: HWND,
+    pub overlay_view: Rc<FileDragAndDropOverlayView>,
+    pub dd_helper: IDropTargetHelper,
+    pub app_state: std::rc::Weak<RefCell<AppState>>,
+}
+impl IDropTarget_Impl for DropTargetHandler_Impl {
+    fn DragEnter(
+        &self,
+        pdataobj: windows_core::Ref<'_, windows::Win32::System::Com::IDataObject>,
+        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            self.dd_helper.DragEnter(
+                self.bound_hwnd,
+                pdataobj.unwrap(),
+                &POINT { x: pt.x, y: pt.y },
+                core::ptr::read(pdweffect),
+            )?;
+        }
+        self.overlay_view.show();
+        unsafe {
+            core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> windows_core::Result<()> {
+        unsafe {
+            self.dd_helper.DragLeave()?;
+        }
+        self.overlay_view.hide();
+        Ok(())
+    }
+
+    fn DragOver(
+        &self,
+        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            self.dd_helper
+                .DragOver(&POINT { x: pt.x, y: pt.y }, core::ptr::read(pdweffect))?;
+        }
+        unsafe {
+            core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        pdataobj: windows_core::Ref<'_, windows::Win32::System::Com::IDataObject>,
+        _grfkeystate: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        pt: &windows::Win32::Foundation::POINTL,
+        pdweffect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows_core::Result<()> {
+        let data = OwnedStgMedium(unsafe {
+            pdataobj
+                .unwrap()
+                .GetData(&FORMATETC {
+                    cfFormat: CF_HDROP.0,
+                    ptd: core::ptr::null_mut(),
+                    dwAspect: DVASPECT_CONTENT.0,
+                    lindex: -1,
+                    tymed: TYMED_HGLOBAL.0 as _,
+                })
+                .unwrap()
+        });
+        let glock = unsafe { LockedGlobal::acquire(data.hglobal_unchecked()) };
+        let hdrop: HDROP = unsafe { core::mem::transmute(glock.ptr) };
+        let file_count = unsafe { DragQueryFileW(hdrop, 0xffff_ffff, None) };
+        let mut sprites = Vec::with_capacity(file_count as _);
+        for n in 0..file_count {
+            let len = unsafe { DragQueryFileW(hdrop, n, None) };
+            let mut path = Vec::with_capacity((len + 1) as _);
+            unsafe {
+                path.set_len(path.capacity());
+            }
+            if unsafe { DragQueryFileW(hdrop, n, Some(&mut path)) } == 0 {
+                panic!("DragQueryFileW(querying file path) failed");
+            }
+
+            let path = PathBuf::from(OsString::from_wide(&path[..path.len() - 1]));
+            if path.is_dir() {
+                // process all files in directory(rec)
+                for entry in walkdir::WalkDir::new(&path)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        // 自分自身を含むみたいなのでその場合は見逃す
+                        continue;
+                    }
+
+                    let mut fs = std::fs::File::open(&path).unwrap();
+                    let Some(png_meta) = source_reader::png::Metadata::try_read(&mut fs) else {
+                        // PNGじゃないのは一旦見逃す
+                        continue;
+                    };
+
+                    sprites.push(SpriteInfo {
+                        name: path.file_stem().unwrap().to_str().unwrap().into(),
+                        source_path: path.to_path_buf(),
+                        width: png_meta.width as _,
+                        height: png_meta.height as _,
+                        left: 0,
+                        top: 0,
+                        left_slice: 0,
+                        right_slice: 0,
+                        top_slice: 0,
+                        bottom_slice: 0,
+                    });
+                }
+            } else {
+                let mut fs = std::fs::File::open(&path).unwrap();
+                let png_meta = source_reader::png::Metadata::try_read(&mut fs).expect("not a png?");
+
+                // strip nul-character
+                sprites.push(SpriteInfo {
+                    name: path.file_stem().unwrap().to_str().unwrap().into(),
+                    source_path: path,
+                    width: png_meta.width as _,
+                    height: png_meta.height as _,
+                    left: 0,
+                    top: 0,
+                    left_slice: 0,
+                    right_slice: 0,
+                    top_slice: 0,
+                    bottom_slice: 0,
+                });
+            }
+        }
+        drop(glock);
+        drop(data);
+
+        if let Some(m) = self.app_state.upgrade() {
+            m.borrow_mut().add_sprites(sprites);
+        }
+
+        unsafe {
+            self.dd_helper.Drop(
+                pdataobj.unwrap(),
+                &POINT { x: pt.x, y: pt.y },
+                core::ptr::read(pdweffect),
+            )?;
+        }
+        self.overlay_view.hide();
+        unsafe {
+            core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+
+        Ok(())
+    }
+}
+
+struct OwnedStgMedium(pub STGMEDIUM);
+impl Drop for OwnedStgMedium {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseStgMedium(&mut self.0);
+        }
+    }
+}
+impl OwnedStgMedium {
+    pub unsafe fn hglobal_unchecked(&self) -> HGLOBAL {
+        unsafe { self.0.u.hGlobal }
+    }
+}
+
+struct LockedGlobal {
+    handle: HGLOBAL,
+    ptr: *mut core::ffi::c_void,
+}
+impl Drop for LockedGlobal {
+    fn drop(&mut self) {
+        if let Err(e) = unsafe { GlobalUnlock(self.handle) } {
+            if e.code() != windows::Win32::Foundation::S_OK {
+                // Note: なぜかErrなのに中身S_OKが返ってくることがあるらしい
+                tracing::warn!({ ?e }, "GlobalUnlock failed");
+            }
+        }
+    }
+}
+impl LockedGlobal {
+    pub unsafe fn acquire(handle: HGLOBAL) -> Self {
+        let ptr = unsafe { GlobalLock(handle) };
+
+        Self { handle, ptr }
+    }
+}
+
+#[derive(Debug)]
+pub struct SpriteInfo {
+    pub name: String,
+    pub source_path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub left: u32,
+    pub top: u32,
+    pub left_slice: u32,
+    pub right_slice: u32,
+    pub top_slice: u32,
+    pub bottom_slice: u32,
+}
+
+pub struct AppState {
+    pub atlas_width: u32,
+    pub atlas_height: u32,
+    pub sprites: Vec<SpriteInfo>,
+    pub sprites_update_callbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
+}
+impl AppState {
+    pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {
+        self.sprites.extend(sprites);
+        for x in self.sprites_update_callbacks.iter_mut() {
+            x(&self.sprites);
+        }
+    }
+}
+
 fn main() {
+    tracing_subscriber::fmt().pretty().init();
+    unsafe {
+        OleInitialize(None).unwrap();
+    }
+
     let _ = AppRuntime::init().expect("Failed to initialize app runtime");
 
     let _dispatcher_queue_controller = unsafe {
@@ -2126,7 +2931,7 @@ fn main() {
         })
         .expect("Failed to create dispatcher queue")
     };
-    let subsystem = Subsystem::new();
+    let subsystem = Rc::new(Subsystem::new());
 
     let cls = WNDCLASSEXW {
         cbSize: core::mem::size_of::<WNDCLASSEXW>() as _,
@@ -2180,7 +2985,28 @@ fn main() {
         .expect("Failed to set dark mode preference");
     }
 
-    let mut app_window_state_model = AppWindowStateModel::new(&subsystem, hw);
+    let app_state = Rc::new(RefCell::new(AppState {
+        atlas_width: 32,
+        atlas_height: 32,
+        sprites: Vec::new(),
+        sprites_update_callbacks: Vec::new(),
+    }));
+
+    let mut app_window_state_model = AppWindowStateModel::new(&subsystem, hw, &app_state);
+    let dd_helper: IDropTargetHelper =
+        unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER).unwrap() };
+    unsafe {
+        RegisterDragDrop(
+            hw,
+            &IDropTarget::from(DropTargetHandler {
+                bound_hwnd: hw,
+                overlay_view: app_window_state_model.file_dnd_overlay.clone(),
+                dd_helper,
+                app_state: Rc::downgrade(&app_state),
+            }),
+        )
+        .unwrap();
+    }
 
     let grid_view_render_waits = unsafe {
         app_window_state_model
@@ -2267,6 +3093,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
     if msg == WM_DESTROY {
         unsafe {
+            RevokeDragDrop(hwnd).unwrap();
             PostQuitMessage(0);
         }
         return LRESULT(0);
