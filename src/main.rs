@@ -12,88 +12,12 @@ use composition_element_builder::{
     ContainerVisualParams, SimpleScalarAnimationParams, SpriteVisualParams,
 };
 use effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams};
-use extra_bindings::Microsoft::Graphics::Canvas::{
-    CanvasComposite,
-    Effects::{CompositeEffect, GaussianBlurEffect},
-};
+use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
 use subsystem::Subsystem;
-use tracing::instrument::WithSubscriber;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use windows::{
-    core::{h, w, Interface, HRESULT, PCWSTR},
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
-    Win32::{
-        Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
-        Graphics::{
-            Direct2D::{
-                Common::{D2D1_COLOR_F, D2D_POINT_2F, D2D_RECT_F},
-                ID2D1DeviceContext, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT,
-            },
-            Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
-            Direct3D11::{
-                ID3D11Buffer, ID3D11PixelShader, ID3D11Texture2D, ID3D11VertexShader,
-                D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE,
-                D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_VIEW_DESC,
-                D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
-                D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
-            },
-            DirectWrite::{
-                IDWriteTextLayout1, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_LIGHT,
-                DWRITE_TEXT_RANGE,
-            },
-            Dwm::{
-                DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE,
-            },
-            Dxgi::{
-                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-                IDXGIAdapter, IDXGIDevice2, IDXGIFactory2, IDXGISwapChain2, DXGI_PRESENT,
-                DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            },
-            Gdi::{MapWindowPoints, HBRUSH},
-        },
-        Storage::Packaging::Appx::PACKAGE_VERSION,
-        System::{
-            Com::{
-                CoCreateInstance, CLSCTX_INPROC_SERVER, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
-                STGMEDIUM, TYMED_HGLOBAL,
-            },
-            LibraryLoader::GetModuleHandleW,
-            Memory::{GlobalLock, GlobalUnlock},
-            Ole::{
-                IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
-                RevokeDragDrop, CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_LINK,
-            },
-            Threading::INFINITE,
-            WinRT::{
-                Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
-                DispatcherQueueOptions, DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT,
-            },
-        },
-        UI::{
-            Controls::MARGINS,
-            HiDpi::GetDpiForWindow,
-            Shell::{
-                CLSID_DragDropHelper, DragAcceptFiles, DragQueryFileW, IDropTargetHelper, HDROP,
-            },
-            WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetSystemMetrics,
-                GetWindowLongPtrW, GetWindowRect, LoadCursorW, LoadIconW,
-                MsgWaitForMultipleObjects, PeekMessageW, PostQuitMessage, RegisterClassExW,
-                SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-                CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HTCLIENT, HTTOP, IDC_ARROW, IDC_SIZEWE,
-                IDI_APPLICATION, NCCALCSIZE_PARAMS, PM_REMOVE, QS_ALLINPUT, SM_CXSIZEFRAME,
-                SM_CYSIZEFRAME, SWP_FRAMECHANGED, SW_SHOW, WM_ACTIVATE, WM_CREATE, WM_DESTROY,
-                WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
-                WM_NCHITTEST, WM_QUIT, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WNDCLASS_STYLES,
-                WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_OVERLAPPEDWINDOW,
-                WS_OVERLAPPEDWINDOW,
-            },
-        },
-    },
     UI::{
         Color,
         Composition::{
@@ -104,8 +28,76 @@ use windows::{
             VisualCollection,
         },
     },
+    Win32::{
+        Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
+        Graphics::{
+            Direct2D::{
+                Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F},
+                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1DeviceContext,
+            },
+            Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+            Direct3D11::{
+                D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE,
+                D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_VIEW_DESC,
+                D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
+                D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+                ID3D11Buffer, ID3D11PixelShader, ID3D11Texture2D, ID3D11VertexShader,
+            },
+            DirectWrite::{
+                DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_LIGHT, DWRITE_TEXT_RANGE,
+                IDWriteTextLayout1,
+            },
+            Dwm::{
+                DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+            },
+            Dxgi::{
+                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+                DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice2, IDXGIFactory2,
+                IDXGISwapChain2,
+            },
+            Gdi::{HBRUSH, MapWindowPoints},
+        },
+        Storage::Packaging::Appx::PACKAGE_VERSION,
+        System::{
+            Com::{
+                CLSCTX_INPROC_SERVER, CoCreateInstance, DVASPECT_CONTENT, FORMATETC, STGMEDIUM,
+                TYMED_HGLOBAL,
+            },
+            LibraryLoader::GetModuleHandleW,
+            Memory::{GlobalLock, GlobalUnlock},
+            Ole::{
+                CF_HDROP, DROPEFFECT_LINK, IDropTarget, IDropTarget_Impl, OleInitialize,
+                RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+            },
+            Threading::INFINITE,
+            WinRT::{
+                Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
+                DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
+            },
+        },
+        UI::{
+            Controls::MARGINS,
+            HiDpi::GetDpiForWindow,
+            Shell::{CLSID_DragDropHelper, DragQueryFileW, HDROP, IDropTargetHelper},
+            WindowsAndMessaging::{
+                CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
+                GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HCURSOR,
+                HTCLIENT, HTTOP, IDC_ARROW, IDC_SIZEWE, IDI_APPLICATION, LoadCursorW, LoadIconW,
+                MsgWaitForMultipleObjects, NCCALCSIZE_PARAMS, PM_REMOVE, PeekMessageW,
+                PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SM_CXSIZEFRAME, SM_CYSIZEFRAME,
+                SW_SHOW, SWP_FRAMECHANGED, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                TranslateMessage, WM_ACTIVATE, WM_CREATE, WM_DESTROY, WM_DPICHANGED,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_QUIT,
+                WM_SETCURSOR, WM_SIZE, WNDCLASS_STYLES, WNDCLASSEXW, WS_EX_APPWINDOW,
+                WS_EX_NOREDIRECTIONBITMAP, WS_EX_OVERLAPPEDWINDOW, WS_OVERLAPPEDWINDOW,
+            },
+        },
+    },
+    core::{HRESULT, Interface, PCWSTR, h, w},
 };
-use windows_core::{implement, BOOL, HSTRING};
+use windows_core::{BOOL, HSTRING, implement};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 mod component;
@@ -1716,7 +1708,10 @@ impl SpriteListPaneView {
             .InsertScalar(h!("TopOffset"), 0.0)
             .unwrap();
 
-        let offset_expr = format!("Vector3(-this.Target.Size.X - ({spc} * compositionProperties.DPI / 96.0) + (this.Target.Size.X + ({spc} * 2.0 * compositionProperties.DPI / 96.0)) * compositionProperties.ShownRate, compositionProperties.TopOffset * compositionProperties.DPI / 96.0, 0.0)", spc = Self::SPACING);
+        let offset_expr = format!(
+            "Vector3(-this.Target.Size.X - ({spc} * compositionProperties.DPI / 96.0) + (this.Target.Size.X + ({spc} * 2.0 * compositionProperties.DPI / 96.0)) * compositionProperties.ShownRate, compositionProperties.TopOffset * compositionProperties.DPI / 96.0, 0.0)",
+            spc = Self::SPACING
+        );
         let root_offset = init
             .subsystem
             .compositor
@@ -2248,7 +2243,7 @@ impl FileDragAndDropOverlayView {
             .CreateEffectFactoryWithProperties(
                 &composite_effect,
                 &windows_collections::IIterable::<HSTRING>::from(vec![
-                    h!("Blur.BlurAmount").clone()
+                    h!("Blur.BlurAmount").clone(),
                 ]),
             )
             .unwrap();
