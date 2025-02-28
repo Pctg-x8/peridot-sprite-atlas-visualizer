@@ -1025,6 +1025,12 @@ impl SpriteListCellView {
     const FRAME_TEX_SIZE: f32 = 24.0;
     const CORNER_RADIUS: f32 = 8.0;
     const CELL_HEIGHT: f32 = 20.0;
+    const LABEL_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
 
     fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
         let s = subsystem
@@ -1118,10 +1124,7 @@ impl SpriteListCellView {
                     dc.SetDpi(init.dpi, init.dpi);
                 }
 
-                let brush = scoped_try!(
-                    'drawing,
-                    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, None) }
-                );
+                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None) });
 
                 unsafe {
                     dc.Clear(None);
@@ -1312,10 +1315,7 @@ impl SpriteListCellView {
                     dc.SetDpi(dpi, dpi);
                 }
 
-                let brush = scoped_try!(
-                    'drawing,
-                    unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.1, g: 0.1, b: 0.1, a: 1.0 }, None) }
-                );
+                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None) });
 
                 unsafe {
                     dc.Clear(None);
