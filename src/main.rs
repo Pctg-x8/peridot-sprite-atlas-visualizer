@@ -1215,7 +1215,7 @@ impl SpriteListCellView {
                     .unwrap(),
             )
             .unwrap();
-        opacity_transition.SetDuration(timespan_ms(150)).unwrap();
+        opacity_transition.SetDuration(timespan_ms(100)).unwrap();
         opacity_transition.SetTarget(h!("Opacity")).unwrap();
 
         let bg_implicit_animations = init
@@ -2098,7 +2098,6 @@ impl SpriteListPanePresenter {
                         return;
                     };
 
-                    tracing::info!("sprites updated: {sprites:?}");
                     sprite_list_contents.clear();
                     sprite_list_contents.extend(sprites.iter().map(|x| x.name.clone()));
                     let visible_contents = &sprite_list_contents[..];
@@ -2418,7 +2417,7 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        _ht: &mut HitTestTreeContext,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
@@ -2441,7 +2440,7 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        _ht: &mut HitTestTreeContext,
         client_x: f32,
         client_y: f32,
         _client_width: f32,
@@ -2466,7 +2465,7 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        _ht: &mut HitTestTreeContext,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
@@ -2488,29 +2487,45 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     }
 }
 
-struct AppWindowStateModel {
-    ht: Rc<RefCell<HitTestTreeContext>>,
+pub struct AppWindowDpiHandler {
+    ht_action_handler: Rc<AppWindowHitTestTreeActionHandler>,
+}
+impl DpiHandler for AppWindowDpiHandler {
+    fn on_dpi_changed(&self, new_dpi: f32) {
+        self.ht_action_handler.dpi.set(new_dpi);
+    }
+}
+
+struct AppWindowPresenter {
+    root: ContainerVisual,
     ht_root: HitTestTreeRef,
-    client_size_pixels: SizePixels,
-    dpi: f32,
-    dpi_handlers: Vec<std::rc::Weak<dyn DpiHandler>>,
-    pointer_input_manager: PointerInputManager,
-    composition_target: DesktopWindowTarget,
-    composition_root: ContainerVisual,
-    header_view: AppHeaderView,
     grid_view: Rc<AtlasBaseGridView>,
     sprite_list_pane: SpriteListPanePresenter,
+    header_view: AppHeaderView,
     file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
-    app_window_ht_action_handler: Rc<AppWindowHitTestTreeActionHandler>,
+    _ht_action_handler: Rc<AppWindowHitTestTreeActionHandler>,
+    _dpi_handler: Rc<AppWindowDpiHandler>,
 }
-impl AppWindowStateModel {
-    pub fn new(
-        subsystem: &Rc<Subsystem>,
-        bound_hwnd: HWND,
-        app_state: &Rc<RefCell<AppState>>,
-    ) -> Self {
-        let mut ht = HitTestTreeContext::new();
-        let ht_root = ht.alloc(HitTestTreeData {
+impl AppWindowPresenter {
+    pub fn new(init: &mut PresenterInitContext, init_client_size_pixels: &SizePixels) -> Self {
+        let root = ContainerVisualParams::new()
+            .expand()
+            .instantiate(&init.for_view.subsystem.compositor)
+            .unwrap();
+
+        let bg = SpriteVisualParams::new(
+            &init
+                .for_view
+                .subsystem
+                .compositor
+                .CreateColorBrushWithColor(BG_COLOR)
+                .unwrap(),
+        )
+        .expand()
+        .instantiate(&init.for_view.subsystem.compositor)
+        .unwrap();
+
+        let ht_root = init.for_view.ht.borrow_mut().alloc(HitTestTreeData {
             left: 0.0,
             top: 0.0,
             left_adjustment_factor: 0.0,
@@ -2523,6 +2538,85 @@ impl AppWindowStateModel {
             children: vec![],
             action_handler: None,
         });
+
+        let grid_view = Rc::new(AtlasBaseGridView::new(&mut init.for_view, 128, 128));
+        grid_view.resize(
+            init_client_size_pixels.width,
+            init_client_size_pixels.height,
+        );
+
+        let sprite_list_pane = SpriteListPanePresenter::new(init);
+
+        let header_view =
+            AppHeaderView::new(&mut init.for_view, "Peridot SpriteAtlas Visualizer/Editor");
+
+        let file_dnd_overlay = Rc::new(FileDragAndDropOverlayView::new(&mut init.for_view));
+
+        sprite_list_pane.set_top(&mut init.for_view.ht.borrow_mut(), header_view.height());
+
+        root.Children().unwrap().InsertAtBottom(&bg).unwrap();
+        grid_view.mount(&root.Children().unwrap());
+        sprite_list_pane.mount(
+            &root.Children().unwrap(),
+            &mut init.for_view.ht.borrow_mut(),
+            ht_root,
+        );
+        header_view.mount(&root.Children().unwrap());
+        file_dnd_overlay.mount(&root.Children().unwrap());
+
+        let ht_action_handler = Rc::new(AppWindowHitTestTreeActionHandler {
+            grid_view: grid_view.clone(),
+            drag_data: Cell::new(None),
+            dpi: Cell::new(init.for_view.dpi),
+            ht_root,
+        });
+        init.for_view
+            .ht
+            .borrow_mut()
+            .get_mut(ht_root)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+
+        let dpi_handler = Rc::new(AppWindowDpiHandler {
+            ht_action_handler: ht_action_handler.clone(),
+        });
+        init.dpi_handlers.push(Rc::downgrade(&dpi_handler) as _);
+
+        init.app_state
+            .borrow_mut()
+            .sprites_update_callbacks
+            .push(Box::new(move |sprites| {
+                tracing::info!({?sprites}, "update sprites");
+            }));
+
+        Self {
+            root,
+            ht_root,
+            grid_view,
+            sprite_list_pane,
+            header_view,
+            file_dnd_overlay,
+            _ht_action_handler: ht_action_handler,
+            _dpi_handler: dpi_handler,
+        }
+    }
+}
+
+struct AppWindowStateModel {
+    ht: Rc<RefCell<HitTestTreeContext>>,
+    client_size_pixels: SizePixels,
+    dpi: f32,
+    dpi_handlers: Vec<std::rc::Weak<dyn DpiHandler>>,
+    pointer_input_manager: PointerInputManager,
+    composition_target: DesktopWindowTarget,
+    root_presenter: AppWindowPresenter,
+}
+impl AppWindowStateModel {
+    pub fn new(
+        subsystem: &Rc<Subsystem>,
+        bound_hwnd: HWND,
+        app_state: &Rc<RefCell<AppState>>,
+    ) -> Self {
+        let ht = Rc::new(RefCell::new(HitTestTreeContext::new()));
         let mut client_size_pixels = core::mem::MaybeUninit::uninit();
         unsafe {
             GetClientRect(bound_hwnd, client_size_pixels.as_mut_ptr()).unwrap();
@@ -2547,102 +2641,39 @@ impl AppWindowStateModel {
                 .unwrap()
         };
 
-        let composition_root = subsystem.compositor.CreateContainerVisual().unwrap();
-        composition_root
-            .SetRelativeSizeAdjustment(Vector2::one())
-            .unwrap();
-        composition_target.SetRoot(&composition_root).unwrap();
-
-        let bg = subsystem
-            .compositor
-            .CreateSpriteVisual()
-            .expect("Failed to create bg visual");
-        bg.SetBrush(
-            &subsystem
-                .compositor
-                .CreateColorBrushWithColor(BG_COLOR)
-                .expect("Failed to create bg brush"),
-        )
-        .expect("Failed to set bg brush");
-        bg.SetRelativeSizeAdjustment(Vector2::one())
-            .expect("Failed to set bg size");
-        composition_root
-            .Children()
-            .expect("Failed to get children")
-            .InsertAtBottom(&bg)
-            .expect("Failed to insert bg");
-
-        let ht = Rc::new(RefCell::new(ht));
-        let mut presenter_init_context = PresenterInitContext {
-            for_view: ViewInitContext {
-                subsystem,
-                ht: &ht,
-                dpi,
+        let root_presenter = AppWindowPresenter::new(
+            &mut PresenterInitContext {
+                for_view: ViewInitContext {
+                    subsystem,
+                    ht: &ht,
+                    dpi,
+                },
+                dpi_handlers: &mut dpi_handlers,
+                app_state,
             },
-            dpi_handlers: &mut dpi_handlers,
-            app_state,
-        };
-
-        let grid_view = Rc::new(AtlasBaseGridView::new(
-            &mut presenter_init_context.for_view,
-            128,
-            128,
-        ));
-        grid_view.mount(&composition_root.Children().unwrap());
-        grid_view.resize(client_size_pixels.width, client_size_pixels.height);
-
-        let sprite_list_pane = SpriteListPanePresenter::new(&mut presenter_init_context);
-        sprite_list_pane.mount(
-            &composition_root.Children().unwrap(),
-            &mut presenter_init_context.for_view.ht.borrow_mut(),
-            ht_root,
+            &client_size_pixels,
         );
+        composition_target.SetRoot(&root_presenter.root).unwrap();
 
-        let header_view = AppHeaderView::new(
-            &mut presenter_init_context.for_view,
-            "Peridot SpriteAtlas Visualizer/Editor",
-        );
-        header_view.mount(&composition_root.Children().unwrap());
-
-        let file_dnd_overlay = Rc::new(FileDragAndDropOverlayView::new(
-            &mut presenter_init_context.for_view,
-        ));
-        file_dnd_overlay.mount(&composition_root.Children().unwrap());
-
-        sprite_list_pane.set_top(&mut ht.borrow_mut(), header_view.height());
-
-        let app_window_ht_action_handler = Rc::new(AppWindowHitTestTreeActionHandler {
-            grid_view: grid_view.clone(),
-            drag_data: Cell::new(None),
-            dpi: Cell::new(dpi),
-            ht_root,
-        });
-        ht.borrow_mut().get_mut(ht_root).action_handler =
-            Some(Rc::downgrade(&app_window_ht_action_handler) as _);
-
-        ht.borrow().dump(ht_root);
+        ht.borrow().dump(root_presenter.ht_root);
 
         tracing::info!({ dpi }, "window state initialized");
 
         Self {
             ht,
-            ht_root,
             client_size_pixels,
             dpi,
             dpi_handlers,
             pointer_input_manager,
             composition_target,
-            composition_root,
-            header_view,
-            grid_view,
-            sprite_list_pane,
-            file_dnd_overlay,
-            app_window_ht_action_handler,
+            root_presenter,
         }
     }
 
     pub fn shutdown(&mut self) {
-        self.sprite_list_pane.shutdown(&mut self.ht.borrow_mut());
+        self.root_presenter
+            .sprite_list_pane
+            .shutdown(&mut self.ht.borrow_mut());
     }
 
     pub fn client_size_dip(&self) -> Size {
@@ -2682,7 +2713,7 @@ impl AppWindowStateModel {
         };
         let size = self.client_size_dip();
 
-        if let Some(ht) = self.header_view.nc_hittest(&p, &size) {
+        if let Some(ht) = self.root_presenter.header_view.nc_hittest(&p, &size) {
             return Some(LRESULT(ht as _));
         }
 
@@ -2696,15 +2727,13 @@ impl AppWindowStateModel {
                 x.on_dpi_changed(new_dpi as _);
             }
         }
-
-        self.app_window_ht_action_handler.dpi.set(new_dpi as _);
     }
 
     pub fn resize(&mut self, new_width: u16, new_height: u16) {
         self.client_size_pixels.width = new_width as _;
         self.client_size_pixels.height = new_height as _;
 
-        self.grid_view.resize(
+        self.root_presenter.grid_view.resize(
             self.client_size_pixels.width,
             self.client_size_pixels.height,
         );
@@ -2713,7 +2742,7 @@ impl AppWindowStateModel {
     pub fn on_mouse_move(&mut self, x_pixels: i16, y_pixels: i16) {
         self.pointer_input_manager.on_mouse_move(
             &mut self.ht.borrow_mut(),
-            self.ht_root,
+            self.root_presenter.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
             signed_pixels_to_dip(y_pixels as _, self.dpi),
@@ -2731,7 +2760,7 @@ impl AppWindowStateModel {
         self.pointer_input_manager.on_mouse_left_down(
             hwnd,
             &mut self.ht.borrow_mut(),
-            self.ht_root,
+            self.root_presenter.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
             signed_pixels_to_dip(y_pixels as _, self.dpi),
@@ -2742,7 +2771,7 @@ impl AppWindowStateModel {
         self.pointer_input_manager.on_mouse_left_up(
             hwnd,
             &mut self.ht.borrow_mut(),
-            self.ht_root,
+            self.root_presenter.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
             signed_pixels_to_dip(y_pixels as _, self.dpi),
@@ -3073,7 +3102,10 @@ fn main() {
             hw,
             &IDropTarget::from(DropTargetHandler {
                 bound_hwnd: hw,
-                overlay_view: app_window_state_model.file_dnd_overlay.clone(),
+                overlay_view: app_window_state_model
+                    .root_presenter
+                    .file_dnd_overlay
+                    .clone(),
                 dd_helper,
                 app_state: Rc::downgrade(&app_state),
             }),
@@ -3083,6 +3115,7 @@ fn main() {
 
     let grid_view_render_waits = unsafe {
         app_window_state_model
+            .root_presenter
             .grid_view
             .swapchain
             .GetFrameLatencyWaitableObject()
@@ -3113,7 +3146,10 @@ fn main() {
 
         if r == WAIT_OBJECT_0 {
             // update grid view
-            app_window_state_model.grid_view.update_content(&subsystem);
+            app_window_state_model
+                .root_presenter
+                .grid_view
+                .update_content(&subsystem);
             continue;
         }
         if r.0 == WAIT_OBJECT_0.0 + 1 {
