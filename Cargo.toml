@@ -12,6 +12,8 @@ windows-collections = "*"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 tracing = "0.1"
 walkdir = "2"
+crossbeam = { version = "0.8.4", features = ["crossbeam-deque"] }
+image = "0.25.5"
 
 [dependencies.windows]
 version = "0.60"
@@ -39,6 +41,7 @@ features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_SystemServices",
+    "Win32_Security",
     "System",
     "Graphics_Effects",
     "Graphics_DirectX",

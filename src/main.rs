@@ -1,9 +1,15 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::OsString,
     os::windows::ffi::OsStringExt,
     path::PathBuf,
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
 };
 
 use component::app_header::AppHeaderView;
@@ -11,13 +17,16 @@ use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
     ContainerVisualParams, SimpleScalarAnimationParams, SpriteVisualParams,
 };
+use crossbeam::deque::{Injector, Worker};
 use effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams};
 use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
+use image::EncodableLayout;
 use subsystem::Subsystem;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
+    System::{DispatcherQueue, DispatcherQueueController, DispatcherQueueHandler},
     UI::{
         Color,
         Composition::{
@@ -29,7 +38,9 @@ use windows::{
         },
     },
     Win32::{
-        Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
+        Foundation::{
+            CloseHandle, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
+        },
         Graphics::{
             Direct2D::{
                 Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F},
@@ -37,11 +48,15 @@ use windows::{
             },
             Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             Direct3D11::{
-                D3D11_BIND_CONSTANT_BUFFER, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE,
-                D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_VIEW_DESC,
+                D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
+                D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
+                D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE, D3D11_MAP_WRITE_DISCARD,
+                D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RENDER_TARGET_VIEW_DESC,
                 D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
-                D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
-                ID3D11Buffer, ID3D11PixelShader, ID3D11Texture2D, ID3D11VertexShader,
+                D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+                D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE, D3D11_VIEWPORT, ID3D11BlendState,
+                ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
+                ID3D11PixelShader, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
             },
             DirectWrite::{
                 DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_LIGHT, DWRITE_TEXT_RANGE,
@@ -51,7 +66,10 @@ use windows::{
                 DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
             },
             Dxgi::{
-                Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+                Common::{
+                    DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
+                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_SAMPLE_DESC,
+                },
                 DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter, IDXGIDevice2, IDXGIFactory2,
@@ -71,7 +89,7 @@ use windows::{
                 CF_HDROP, DROPEFFECT_LINK, IDropTarget, IDropTarget_Impl, OleInitialize,
                 RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
             },
-            Threading::INFINITE,
+            Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent},
             WinRT::{
                 Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
                 DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
@@ -275,6 +293,9 @@ pub struct ViewInitContext<'r> {
     pub subsystem: &'r Rc<Subsystem>,
     pub ht: &'r Rc<RefCell<HitTestTreeContext>>,
     pub dpi: f32,
+    pub background_worker_enqueue_access: &'r BackgroundWorkerEnqueueAccess,
+    pub background_worker_view_update_callback:
+        &'r Rc<RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>>,
 }
 impl ViewInitContext<'_> {
     #[inline(always)]
@@ -288,11 +309,258 @@ impl ViewInitContext<'_> {
     }
 }
 
+#[repr(transparent)]
+pub struct NativeEvent(HANDLE);
+unsafe impl Sync for NativeEvent {}
+unsafe impl Send for NativeEvent {}
+impl Drop for NativeEvent {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if let Err(e) = unsafe { CloseHandle(self.0) } {
+            tracing::warn!({?e}, "CloseHandle failed");
+        }
+    }
+}
+impl NativeEvent {
+    #[inline(always)]
+    pub fn new(
+        manual_reset: bool,
+        name: impl windows_core::Param<PCWSTR>,
+    ) -> windows_core::Result<Self> {
+        let h = unsafe { CreateEventW(None, manual_reset, false, name)? };
+        Ok(Self(h))
+    }
+
+    #[inline(always)]
+    pub fn signal(&self) {
+        unsafe {
+            SetEvent(self.0).unwrap();
+        }
+    }
+
+    #[inline(always)]
+    pub fn reset(&self) {
+        unsafe {
+            ResetEvent(self.0).unwrap();
+        }
+    }
+}
+
+pub enum BackgroundWork {
+    LoadSpriteSource(PathBuf, Box<dyn FnMut(PathBuf, image::DynamicImage) + Send>),
+}
+
+pub enum BackgroundWorkerViewFeedback {
+    BeginWork(usize, String),
+    EndWork(usize),
+}
+
+#[derive(Clone)]
+pub struct BackgroundWorkerEnqueueAccess(Arc<Injector<BackgroundWork>>);
+impl BackgroundWorkerEnqueueAccess {
+    #[inline]
+    pub fn enqueue(&self, work: BackgroundWork) {
+        self.0.push(work);
+    }
+
+    #[inline]
+    pub fn downgrade(&self) -> BackgroundWorkerEnqueueWeakAccess {
+        BackgroundWorkerEnqueueWeakAccess(Arc::downgrade(&self.0))
+    }
+}
+
+#[derive(Clone)]
+pub struct BackgroundWorkerEnqueueWeakAccess(std::sync::Weak<Injector<BackgroundWork>>);
+impl BackgroundWorkerEnqueueWeakAccess {
+    #[inline]
+    pub fn upgrade(&self) -> Option<BackgroundWorkerEnqueueAccess> {
+        self.0.upgrade().map(BackgroundWorkerEnqueueAccess)
+    }
+}
+
+struct BackgroundWorker {
+    join_handles: Vec<JoinHandle<()>>,
+    work_queue: Arc<Injector<BackgroundWork>>,
+    teardown_signal: Arc<AtomicBool>,
+    view_feedback_receiver: crossbeam::channel::Receiver<BackgroundWorkerViewFeedback>,
+}
+impl BackgroundWorker {
+    pub fn new(ui_thread_wakeup_event: &Arc<NativeEvent>) -> Self {
+        let worker_count = std::thread::available_parallelism()
+            .unwrap_or(unsafe { core::num::NonZero::new_unchecked(4) })
+            .get();
+        let work_queue = Injector::new();
+        let (mut join_handles, mut local_queues, mut stealers) = (
+            Vec::with_capacity(worker_count),
+            Vec::with_capacity(worker_count),
+            Vec::with_capacity(worker_count),
+        );
+        for _ in 0..worker_count {
+            let local_queue = Worker::new_fifo();
+            stealers.push(local_queue.stealer());
+            local_queues.push(local_queue);
+        }
+        let stealers = Arc::new(stealers);
+        let work_queue = Arc::new(work_queue);
+        let teardown_signal = Arc::new(AtomicBool::new(false));
+        let (view_feedback_sender, view_feedback_receiver) = crossbeam::channel::unbounded();
+        for (n, local_queue) in local_queues.into_iter().enumerate() {
+            join_handles.push(
+                std::thread::Builder::new()
+                    .name(format!("Background Worker #{}", n + 1))
+                    .spawn({
+                        let stealers = stealers.clone();
+                        let work_queue = work_queue.clone();
+                        let teardown_signal = teardown_signal.clone();
+                        let view_feedback_sender = view_feedback_sender.clone();
+                        let ui_thread_wakeup_event = ui_thread_wakeup_event.clone();
+
+                        move || {
+                            while !teardown_signal.load(Ordering::Acquire) {
+                                let next = local_queue.pop().or_else(|| {
+                                    core::iter::repeat_with(|| {
+                                        work_queue.steal_batch_and_pop(&local_queue).or_else(|| {
+                                            stealers.iter().map(|x| x.steal()).collect()
+                                        })
+                                    })
+                                    .find(|x| !x.is_retry())
+                                    .and_then(|x| x.success())
+                                });
+
+                                match next {
+                                    Some(BackgroundWork::LoadSpriteSource(path, mut on_complete)) => {
+                                        match view_feedback_sender.send(BackgroundWorkerViewFeedback::BeginWork(n, format!("Loading {}", path.display()))) {
+                                            Ok(()) => (),
+                                            Err(e) => {
+                                                tracing::warn!({?e}, "sending view feedback failed");
+                                            }
+                                        }
+                                        ui_thread_wakeup_event.signal();
+                                        let img = image::open(&path).unwrap();
+                                        on_complete(path, img);
+                                        match view_feedback_sender.send(BackgroundWorkerViewFeedback::EndWork(n)) {
+                                            Ok(()) => (),
+                                            Err(e) => {
+                                                tracing::warn!({?e}, "sending view feedback failed");
+                                            }
+                                        }
+                                        ui_thread_wakeup_event.signal();
+                                    }
+                                    None => {
+                                        // wait for new event
+                                        // TODO: 一旦sleep(1)する（本当はparkとかしてあげたほうがいい）
+                                        std::thread::yield_now();
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .unwrap(),
+            );
+        }
+
+        tracing::info!(
+            { parallelism = worker_count },
+            "BackgroundWorker initialized"
+        );
+
+        Self {
+            join_handles,
+            work_queue,
+            teardown_signal,
+            view_feedback_receiver,
+        }
+    }
+
+    pub fn enqueue_access(&self) -> BackgroundWorkerEnqueueAccess {
+        BackgroundWorkerEnqueueAccess(self.work_queue.clone())
+    }
+
+    pub fn teardown(self) {
+        self.teardown_signal.store(true, Ordering::Release);
+        for x in self.join_handles {
+            x.join().unwrap();
+        }
+    }
+}
+
 #[repr(C, align(16))]
 pub struct AtlasBaseGridRenderParams {
     pub pixel_size: [f32; 2],
     pub grid_offset: [f32; 2],
     pub grid_size: f32,
+}
+
+pub struct SimpleTextureAtlas {
+    pub resource: ID3D11Texture2D,
+    pub current_top: u32,
+    pub current_left: u32,
+    pub max_height: u32,
+}
+impl SimpleTextureAtlas {
+    const SIZE: u32 = 4096;
+
+    pub fn new(d3d11: &ID3D11Device) -> Self {
+        let mut resource = core::mem::MaybeUninit::uninit();
+        unsafe {
+            d3d11
+                .CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Width: Self::SIZE,
+                        Height: Self::SIZE,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                        SampleDesc: DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0,
+                        },
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as _,
+                        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as _,
+                        MiscFlags: 0,
+                    },
+                    None,
+                    Some(resource.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let resource = unsafe { resource.assume_init().unwrap() };
+
+        Self {
+            resource,
+            current_top: 0,
+            current_left: 0,
+            max_height: 0,
+        }
+    }
+
+    pub fn alloc(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if (Self::SIZE - self.current_top) < height {
+            // 高さが足りない
+            return None;
+        }
+
+        if width <= (Self::SIZE - self.current_left) {
+            // まだ入る
+            let o = (self.current_left, self.current_top);
+            self.current_left += width;
+            self.max_height = self.max_height.max(height);
+            Some(o)
+        } else {
+            // 改行が必要
+            if (Self::SIZE - self.current_top - self.max_height) < height {
+                // 改行すると入らなくなる
+                return None;
+            }
+
+            let o = (self.current_left, self.current_top);
+            self.current_top += self.max_height;
+            self.current_left = 0;
+            self.max_height = height;
+            Some(o)
+        }
+    }
 }
 
 pub struct AtlasBaseGridView {
@@ -301,9 +569,20 @@ pub struct AtlasBaseGridView {
     vsh: ID3D11VertexShader,
     psh: ID3D11PixelShader,
     render_params_cb: ID3D11Buffer,
+    texture_preview_vb: ID3D11Buffer,
+    texture_preview_cb: ID3D11Buffer,
+    texture_preview_srv: ID3D11ShaderResourceView,
+    texture_preview_vsh: ID3D11VertexShader,
+    texture_preview_psh: ID3D11PixelShader,
     size_pixels: Cell<(u32, u32)>,
     resize_order: Cell<Option<(u32, u32)>>,
     offset_pixels: Cell<(f32, f32)>,
+    background_worker_enqueue_access: BackgroundWorkerEnqueueWeakAccess,
+    simple_atlas: RefCell<SimpleTextureAtlas>,
+    sprite_source_offset: RefCell<HashMap<PathBuf, (u32, u32)>>,
+    d3d11_device_context: ID3D11DeviceContext,
+    d3d11_mt: ID3D11Multithread,
+    premul_blend_state: ID3D11BlendState,
 }
 impl AtlasBaseGridView {
     pub fn new(
@@ -332,7 +611,7 @@ impl AtlasBaseGridView {
                             Quality: 0,
                         },
                         BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                        BufferCount: 3,
+                        BufferCount: 2,
                         // Composition向けのSwapchainはStretchじゃないとだめらしい
                         Scaling: DXGI_SCALING_STRETCH,
                         SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -399,79 +678,137 @@ impl AtlasBaseGridView {
                         MiscFlags: 0,
                         StructureByteStride: core::mem::size_of::<AtlasBaseGridRenderParams>() as _,
                     },
-                    Some(&D3D11_SUBRESOURCE_DATA {
-                        pSysMem: (&AtlasBaseGridRenderParams {
-                            pixel_size: [init_width_pixels as _, init_height_pixels as _],
-                            grid_offset: [0.0, 0.0],
-                            grid_size: 64.0,
-                        }) as *const _ as _,
-                        SysMemPitch: 0,
-                        SysMemSlicePitch: 0,
-                    }),
+                    None,
                     Some(render_params_cb.as_mut_ptr()),
                 )
                 .unwrap();
         }
         let render_params_cb = unsafe { render_params_cb.assume_init().unwrap() };
 
-        let bb = unsafe { sc.GetBuffer::<ID3D11Texture2D>(0).unwrap() };
-        let mut rtv = core::mem::MaybeUninit::uninit();
+        let mut premul_blend_state = core::mem::MaybeUninit::uninit();
         unsafe {
             init.subsystem
                 .d3d11_device
-                .CreateRenderTargetView(
-                    &bb,
-                    Some(&D3D11_RENDER_TARGET_VIEW_DESC {
-                        ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
-                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
-                            Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
-                        },
-                    }),
-                    Some(rtv.as_mut_ptr()),
+                .CreateBlendState(
+                    &D3D11_BLEND_DESC {
+                        AlphaToCoverageEnable: BOOL(0),
+                        IndependentBlendEnable: BOOL(0),
+                        RenderTarget: [
+                            D3D11_RENDER_TARGET_BLEND_DESC {
+                                BlendEnable: BOOL(1),
+                                SrcBlend: D3D11_BLEND_ONE,
+                                DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+                                BlendOp: D3D11_BLEND_OP_ADD,
+                                SrcBlendAlpha: D3D11_BLEND_ONE,
+                                DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
+                                BlendOpAlpha: D3D11_BLEND_OP_ADD,
+                                RenderTargetWriteMask: 0x0f,
+                            },
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                            D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                        ],
+                    },
+                    Some(premul_blend_state.as_mut_ptr()),
                 )
-                .unwrap()
-        };
-        let rtv = unsafe { rtv.assume_init().unwrap() };
+                .unwrap();
+        }
+        let premul_blend_state = unsafe { premul_blend_state.assume_init().unwrap() };
+
+        let simple_atlas = RefCell::new(SimpleTextureAtlas::new(&init.subsystem.d3d11_device));
+
+        let d3d11_mt: ID3D11Multithread = init.subsystem.d3d11_imm_context.cast().unwrap();
         unsafe {
-            init.subsystem
-                .d3d11_imm_context
-                .OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
-            init.subsystem
-                .d3d11_imm_context
-                .RSSetViewports(Some(&[D3D11_VIEWPORT {
-                    TopLeftX: 0.0,
-                    TopLeftY: 0.0,
-                    Width: init_width_pixels as _,
-                    Height: init_height_pixels as _,
-                    MinDepth: 0.0,
-                    MaxDepth: 1.0,
-                }]));
-            init.subsystem
-                .d3d11_imm_context
-                .RSSetScissorRects(Some(&[RECT {
-                    left: 0,
-                    top: 0,
-                    right: init_width_pixels as _,
-                    bottom: init_height_pixels as _,
-                }]));
-            init.subsystem.d3d11_imm_context.VSSetShader(&vsh, None);
-            init.subsystem.d3d11_imm_context.PSSetShader(&psh, None);
-            init.subsystem
-                .d3d11_imm_context
-                .PSSetConstantBuffers(0, Some(&[Some(render_params_cb.clone())]));
-            init.subsystem
-                .d3d11_imm_context
-                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-            init.subsystem.d3d11_imm_context.Draw(4, 0);
-            init.subsystem.d3d11_imm_context.PSSetShader(None, None);
-            init.subsystem.d3d11_imm_context.VSSetShader(None, None);
-            init.subsystem.d3d11_imm_context.Flush();
+            let _ = d3d11_mt.SetMultithreadProtected(true);
         }
 
+        let mut texture_preview_vb = core::mem::MaybeUninit::uninit();
         unsafe {
-            sc.Present(0, DXGI_PRESENT(0)).ok().unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: core::mem::size_of::<[[f32; 2]; 4]>() as _,
+                        Usage: D3D11_USAGE_IMMUTABLE,
+                        BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as _,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                        StructureByteStride: core::mem::size_of::<[f32; 2]>() as _,
+                    },
+                    Some(&D3D11_SUBRESOURCE_DATA {
+                        pSysMem: [
+                            [0.0f32, 0.0f32],
+                            [1.0f32, 0.0f32],
+                            [0.0f32, 1.0f32],
+                            [1.0f32, 1.0f32],
+                        ]
+                        .as_ptr() as *const _,
+                        SysMemPitch: 0,
+                        SysMemSlicePitch: 0,
+                    }),
+                    Some(texture_preview_vb.as_mut_ptr()),
+                )
+                .unwrap();
         }
+        let texture_preview_vb = unsafe { texture_preview_vb.assume_init().unwrap() };
+        let mut texture_preview_cb = core::mem::MaybeUninit::uninit();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: core::mem::size_of::<[[f32; 2]; 2]>() as _,
+                        Usage: D3D11_USAGE_DYNAMIC,
+                        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as _,
+                        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as _,
+                        MiscFlags: 0,
+                        StructureByteStride: core::mem::size_of::<[[f32; 2]; 2]>() as _,
+                    },
+                    None,
+                    Some(texture_preview_cb.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let texture_preview_cb = unsafe { texture_preview_cb.assume_init().unwrap() };
+
+        let mut texture_preview_srv = core::mem::MaybeUninit::uninit();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateShaderResourceView(
+                    &simple_atlas.borrow().resource,
+                    None,
+                    Some(texture_preview_srv.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let texture_preview_srv = unsafe { texture_preview_srv.assume_init().unwrap() };
+        let mut texture_preview_vsh = core::mem::MaybeUninit::uninit();
+        let mut texture_preview_psh = core::mem::MaybeUninit::uninit();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateVertexShader(
+                    &std::fs::read("./resources/grid/vsh_plane.fxc").unwrap(),
+                    None,
+                    Some(texture_preview_vsh.as_mut_ptr()),
+                )
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreatePixelShader(
+                    &std::fs::read("./resources/grid/psh_tex.fxc").unwrap(),
+                    None,
+                    Some(texture_preview_psh.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let texture_preview_vsh = unsafe { texture_preview_vsh.assume_init().unwrap() };
+        let texture_preview_psh = unsafe { texture_preview_psh.assume_init().unwrap() };
 
         Self {
             root,
@@ -479,9 +816,20 @@ impl AtlasBaseGridView {
             vsh,
             psh,
             render_params_cb,
+            texture_preview_vb,
+            texture_preview_cb,
+            texture_preview_srv,
+            texture_preview_vsh,
+            texture_preview_psh,
             size_pixels: Cell::new((init_width_pixels, init_height_pixels)),
             resize_order: Cell::new(None),
             offset_pixels: Cell::new((0.0, 0.0)),
+            background_worker_enqueue_access: init.background_worker_enqueue_access.downgrade(),
+            simple_atlas,
+            sprite_source_offset: RefCell::new(HashMap::new()),
+            d3d11_device_context: init.subsystem.d3d11_imm_context.clone(),
+            d3d11_mt,
+            premul_blend_state,
         }
     }
 
@@ -510,6 +858,69 @@ impl AtlasBaseGridView {
         self.resize_order.set(Some((new_width_px, new_height_px)));
     }
 
+    pub fn update_sprites(&self, sprites: &[SpriteInfo]) {
+        let Some(background_worker_enqueue_access) =
+            self.background_worker_enqueue_access.upgrade()
+        else {
+            // app teardown-ed
+            return;
+        };
+
+        for x in sprites {
+            if self
+                .sprite_source_offset
+                .borrow()
+                .contains_key(&x.source_path)
+            {
+                // ロード済み
+                continue;
+            }
+
+            let Some((ox, oy)) = self.simple_atlas.borrow_mut().alloc(x.width, x.height) else {
+                tracing::warn!("no suitable region(realloc or alloc page here...)");
+                continue;
+            };
+            self.sprite_source_offset
+                .borrow_mut()
+                .insert(x.source_path.clone(), (ox, oy));
+
+            background_worker_enqueue_access.enqueue(BackgroundWork::LoadSpriteSource(
+                x.source_path.clone(),
+                Box::new({
+                    let d3d11_device_context = self.d3d11_device_context.clone();
+                    let d3d11_mt = self.d3d11_mt.clone();
+                    let simple_atlas_resource = self.simple_atlas.borrow().resource.clone();
+                    let (width, height) = (x.width, x.height);
+
+                    move |path, di| {
+                        // TODO: HDR対応
+                        let img_formatted = di.to_rgba8();
+                        unsafe {
+                            d3d11_mt.Enter();
+                            d3d11_device_context.UpdateSubresource(
+                                &simple_atlas_resource,
+                                0,
+                                Some(&D3D11_BOX {
+                                    left: ox,
+                                    top: oy,
+                                    front: 0,
+                                    right: ox + width,
+                                    bottom: oy + height,
+                                    back: 1,
+                                }),
+                                img_formatted.as_bytes().as_ptr() as *const _,
+                                img_formatted.width() * 4,
+                                0,
+                            );
+                            d3d11_mt.Leave();
+                        }
+                        tracing::info!({?path, ox, oy}, "LoadSpriteComplete");
+                    }
+                }),
+            ));
+        }
+    }
+
     pub fn set_offset(&self, offset_x: f32, offset_y: f32) {
         self.offset_pixels.set((offset_x, offset_y));
     }
@@ -519,7 +930,7 @@ impl AtlasBaseGridView {
             unsafe {
                 self.swapchain
                     .ResizeBuffers(
-                        3,
+                        2,
                         req_width_px,
                         req_height_px,
                         DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -534,6 +945,9 @@ impl AtlasBaseGridView {
         let (width_px, height_px) = self.size_pixels.get();
         let (offset_x, offset_y) = self.offset_pixels.get();
 
+        unsafe {
+            self.d3d11_mt.Enter();
+        }
         let mut mapped = core::mem::MaybeUninit::uninit();
         unsafe {
             subsystem
@@ -560,6 +974,35 @@ impl AtlasBaseGridView {
         }
         unsafe {
             subsystem.d3d11_imm_context.Unmap(&self.render_params_cb, 0);
+        }
+
+        let mut mapped = core::mem::MaybeUninit::uninit();
+        unsafe {
+            subsystem
+                .d3d11_imm_context
+                .Map(
+                    &self.texture_preview_cb,
+                    0,
+                    D3D11_MAP_WRITE_DISCARD,
+                    0,
+                    Some(mapped.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let mapped = unsafe { mapped.assume_init() };
+        unsafe {
+            core::ptr::write(
+                mapped.pData as _,
+                [[width_px as f32, height_px as f32], [offset_x, offset_y]],
+            );
+        }
+        unsafe {
+            subsystem
+                .d3d11_imm_context
+                .Unmap(&self.texture_preview_cb, 0);
+        }
+        unsafe {
+            self.d3d11_mt.Leave();
         }
 
         let bb = unsafe { self.swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap() };
@@ -609,6 +1052,32 @@ impl AtlasBaseGridView {
             subsystem
                 .d3d11_imm_context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            subsystem.d3d11_imm_context.Draw(4, 0);
+            subsystem
+                .d3d11_imm_context
+                .OMSetBlendState(&self.premul_blend_state, None, u32::MAX);
+            subsystem
+                .d3d11_imm_context
+                .VSSetShader(&self.texture_preview_vsh, None);
+            subsystem
+                .d3d11_imm_context
+                .PSSetShader(&self.texture_preview_psh, None);
+            subsystem
+                .d3d11_imm_context
+                .VSSetConstantBuffers(0, Some(&[Some(self.texture_preview_cb.clone())]));
+            subsystem
+                .d3d11_imm_context
+                .PSSetShaderResources(0, Some(&[Some(self.texture_preview_srv.clone())]));
+            subsystem
+                .d3d11_imm_context
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            subsystem.d3d11_imm_context.IASetVertexBuffers(
+                0,
+                1,
+                Some([Some(self.texture_preview_vb.clone())].as_ptr()),
+                Some(&(core::mem::size_of::<[f32; 2]>() as u32) as *const _),
+                Some(&0u32 as *const _),
+            );
             subsystem.d3d11_imm_context.Draw(4, 0);
             subsystem.d3d11_imm_context.PSSetShader(None, None);
             subsystem.d3d11_imm_context.VSSetShader(None, None);
@@ -1361,7 +1830,7 @@ impl SpriteListPaneView {
         R: 255,
         G: 255,
         B: 255,
-        A: 48,
+        A: 24,
     };
     const SPACING: f32 = 8.0;
     const ADJUST_AREA_THICKNESS: f32 = 4.0;
@@ -2079,9 +2548,25 @@ impl SpriteListPanePresenter {
                 let ht = Rc::downgrade(init.for_view.ht);
                 let view = Rc::downgrade(&view);
                 let sprite_list_cells = Rc::downgrade(&sprite_list_cells);
+                let background_worker_enqueue_access =
+                    init.for_view.background_worker_enqueue_access.downgrade();
+                let background_worker_view_update_callback =
+                    Rc::downgrade(init.for_view.background_worker_view_update_callback);
 
                 move |sprites| {
                     let Some(subsystem) = subsystem.upgrade() else {
+                        // app teardown-ed
+                        return;
+                    };
+                    let Some(background_worker_enqueue_access) =
+                        background_worker_enqueue_access.upgrade()
+                    else {
+                        // app teardown-ed
+                        return;
+                    };
+                    let Some(background_worker_view_update_callback) =
+                        background_worker_view_update_callback.upgrade()
+                    else {
                         // app teardown-ed
                         return;
                     };
@@ -2109,6 +2594,10 @@ impl SpriteListPanePresenter {
                                     subsystem: &subsystem,
                                     ht: &ht,
                                     dpi: view.dpi,
+                                    background_worker_enqueue_access:
+                                        &background_worker_enqueue_access,
+                                    background_worker_view_update_callback:
+                                        &background_worker_view_update_callback,
                                 },
                                 &c,
                                 SpriteListPaneView::CELL_AREA_PADDINGS.top
@@ -2584,8 +3073,17 @@ impl AppWindowPresenter {
         init.app_state
             .borrow_mut()
             .sprites_update_callbacks
-            .push(Box::new(move |sprites| {
-                tracing::info!({?sprites}, "update sprites");
+            .push(Box::new({
+                let grid_view = Rc::downgrade(&grid_view);
+
+                move |sprites| {
+                    let Some(grid_view) = grid_view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+
+                    grid_view.update_sprites(sprites);
+                }
             }));
 
         Self {
@@ -2615,6 +3113,10 @@ impl AppWindowStateModel {
         subsystem: &Rc<Subsystem>,
         bound_hwnd: HWND,
         app_state: &Rc<RefCell<AppState>>,
+        background_worker: &BackgroundWorker,
+        background_worker_view_update_callback: &Rc<
+            RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>,
+        >,
     ) -> Self {
         let ht = Rc::new(RefCell::new(HitTestTreeContext::new()));
         let mut client_size_pixels = core::mem::MaybeUninit::uninit();
@@ -2647,6 +3149,8 @@ impl AppWindowStateModel {
                     subsystem,
                     ht: &ht,
                     dpi,
+                    background_worker_enqueue_access: &background_worker.enqueue_access(),
+                    background_worker_view_update_callback,
                 },
                 dpi_handlers: &mut dpi_handlers,
                 app_state,
@@ -3034,6 +3538,9 @@ fn main() {
         .expect("Failed to create dispatcher queue")
     };
     let subsystem = Rc::new(Subsystem::new());
+    let ui_thread_wakeup_event =
+        Arc::new(NativeEvent::new(false, w!("UIThreadWakeupEvent")).unwrap());
+    let background_worker = BackgroundWorker::new(&ui_thread_wakeup_event);
 
     let cls = WNDCLASSEXW {
         cbSize: core::mem::size_of::<WNDCLASSEXW>() as _,
@@ -3087,6 +3594,10 @@ fn main() {
         .expect("Failed to set dark mode preference");
     }
 
+    let mut bg_worker_vf = Vec::with_capacity(background_worker.join_handles.len());
+    bg_worker_vf.resize_with(background_worker.join_handles.len(), || None);
+    let bg_worker_vf_update_callback: Rc<RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>> =
+        Rc::new(RefCell::new(Vec::new()));
     let app_state = Rc::new(RefCell::new(AppState {
         atlas_width: 32,
         atlas_height: 32,
@@ -3094,7 +3605,13 @@ fn main() {
         sprites_update_callbacks: Vec::new(),
     }));
 
-    let mut app_window_state_model = AppWindowStateModel::new(&subsystem, hw, &app_state);
+    let mut app_window_state_model = AppWindowStateModel::new(
+        &subsystem,
+        hw,
+        &app_state,
+        &background_worker,
+        &bg_worker_vf_update_callback,
+    );
     let dd_helper: IDropTargetHelper =
         unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER).unwrap() };
     unsafe {
@@ -3137,7 +3654,7 @@ fn main() {
     'app: loop {
         let r = unsafe {
             MsgWaitForMultipleObjects(
-                Some(&[grid_view_render_waits]),
+                Some(&[ui_thread_wakeup_event.0, grid_view_render_waits]),
                 false,
                 INFINITE,
                 QS_ALLINPUT,
@@ -3145,6 +3662,36 @@ fn main() {
         };
 
         if r == WAIT_OBJECT_0 {
+            // notify to ui thread
+            loop {
+                match background_worker.view_feedback_receiver.try_recv() {
+                    Ok(BackgroundWorkerViewFeedback::BeginWork(n, msg)) => {
+                        tracing::info!("Thread #{n} has started a work: {msg}");
+                        bg_worker_vf[n] = Some(msg);
+                        for x in bg_worker_vf_update_callback.borrow_mut().iter_mut() {
+                            x(&bg_worker_vf);
+                        }
+                    }
+                    Ok(BackgroundWorkerViewFeedback::EndWork(n)) => {
+                        tracing::info!("Thread #{n} has finished a work");
+                        bg_worker_vf[n] = None;
+                        for x in bg_worker_vf_update_callback.borrow_mut().iter_mut() {
+                            x(&bg_worker_vf);
+                        }
+                    }
+                    Err(crossbeam::channel::TryRecvError::Empty) => {
+                        break;
+                    }
+                    Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                        tracing::warn!("background worker view feedback channel was disconnected");
+                        break;
+                    }
+                }
+            }
+
+            continue;
+        }
+        if r.0 == WAIT_OBJECT_0.0 + 1 {
             // update grid view
             app_window_state_model
                 .root_presenter
@@ -3152,7 +3699,7 @@ fn main() {
                 .update_content(&subsystem);
             continue;
         }
-        if r.0 == WAIT_OBJECT_0.0 + 1 {
+        if r.0 == WAIT_OBJECT_0.0 + 2 {
             while unsafe { PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE).as_bool() } {
                 if unsafe { msg.assume_init_ref().message == WM_QUIT } {
                     break 'app;
@@ -3170,6 +3717,7 @@ fn main() {
         unreachable!();
     }
 
+    background_worker.teardown();
     unsafe {
         SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
     }
