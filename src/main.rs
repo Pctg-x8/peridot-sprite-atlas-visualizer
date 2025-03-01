@@ -291,6 +291,7 @@ impl ViewInitContext<'_> {
 #[repr(C, align(16))]
 pub struct AtlasBaseGridRenderParams {
     pub pixel_size: [f32; 2],
+    pub grid_offset: [f32; 2],
     pub grid_size: f32,
 }
 
@@ -302,6 +303,7 @@ pub struct AtlasBaseGridView {
     render_params_cb: ID3D11Buffer,
     size_pixels: Cell<(u32, u32)>,
     resize_order: Cell<Option<(u32, u32)>>,
+    offset_pixels: Cell<(f32, f32)>,
 }
 impl AtlasBaseGridView {
     pub fn new(
@@ -400,6 +402,7 @@ impl AtlasBaseGridView {
                     Some(&D3D11_SUBRESOURCE_DATA {
                         pSysMem: (&AtlasBaseGridRenderParams {
                             pixel_size: [init_width_pixels as _, init_height_pixels as _],
+                            grid_offset: [0.0, 0.0],
                             grid_size: 64.0,
                         }) as *const _ as _,
                         SysMemPitch: 0,
@@ -478,6 +481,7 @@ impl AtlasBaseGridView {
             render_params_cb,
             size_pixels: Cell::new((init_width_pixels, init_height_pixels)),
             resize_order: Cell::new(None),
+            offset_pixels: Cell::new((0.0, 0.0)),
         }
     }
 
@@ -506,6 +510,10 @@ impl AtlasBaseGridView {
         self.resize_order.set(Some((new_width_px, new_height_px)));
     }
 
+    pub fn set_offset(&self, offset_x: f32, offset_y: f32) {
+        self.offset_pixels.set((offset_x, offset_y));
+    }
+
     pub fn update_content(&self, subsystem: &Subsystem) {
         if let Some((req_width_px, req_height_px)) = self.resize_order.replace(None) {
             unsafe {
@@ -524,6 +532,7 @@ impl AtlasBaseGridView {
         }
 
         let (width_px, height_px) = self.size_pixels.get();
+        let (offset_x, offset_y) = self.offset_pixels.get();
 
         let mut mapped = core::mem::MaybeUninit::uninit();
         unsafe {
@@ -544,6 +553,7 @@ impl AtlasBaseGridView {
                 mapped.pData as _,
                 AtlasBaseGridRenderParams {
                     pixel_size: [width_px as _, height_px as _],
+                    grid_offset: [offset_x, offset_y],
                     grid_size: 64.0,
                 },
             );
@@ -1080,17 +1090,10 @@ impl SpriteListCellView {
     pub fn new(init: &mut ViewInitContext, label: &str, init_top: f32) -> Self {
         let frame_tex = Self::gen_frame_tex(init.subsystem, init.dpi);
 
-        let tl = unsafe {
-            init.subsystem
-                .dwrite_factory
-                .CreateTextLayout(
-                    &label.encode_utf16().collect::<Vec<_>>(),
-                    &init.subsystem.default_ui_format,
-                    f32::MAX,
-                    f32::MAX,
-                )
-                .unwrap()
-        };
+        let tl = init
+            .subsystem
+            .new_text_layout_unrestricted(label, &init.subsystem.default_ui_format)
+            .unwrap();
         let mut tm = core::mem::MaybeUninit::uninit();
         unsafe {
             tl.GetMetrics(tm.as_mut_ptr()).unwrap();
@@ -1272,17 +1275,9 @@ impl SpriteListCellView {
     pub fn set_name(&self, name: &str, subsystem: &Subsystem) {
         let dpi = self.dpi.get();
 
-        let tl = unsafe {
-            subsystem
-                .dwrite_factory
-                .CreateTextLayout(
-                    &name.encode_utf16().collect::<Vec<_>>(),
-                    &subsystem.default_ui_format,
-                    f32::MAX,
-                    f32::MAX,
-                )
-                .unwrap()
-        };
+        let tl = subsystem
+            .new_text_layout_unrestricted(name, &subsystem.default_ui_format)
+            .unwrap();
         let mut tm = core::mem::MaybeUninit::uninit();
         unsafe {
             tl.GetMetrics(tm.as_mut_ptr()).unwrap();
@@ -1508,17 +1503,10 @@ impl SpriteListPaneView {
         .instantiate(&init.subsystem.compositor)
         .unwrap();
 
-        let tl = unsafe {
-            init.subsystem
-                .dwrite_factory
-                .CreateTextLayout(
-                    &"Sprites".encode_utf16().collect::<Vec<_>>(),
-                    &init.subsystem.default_ui_format,
-                    f32::MAX,
-                    f32::MAX,
-                )
-                .unwrap()
-        };
+        let tl = init
+            .subsystem
+            .new_text_layout_unrestricted("Sprites", &init.subsystem.default_ui_format)
+            .unwrap();
         unsafe {
             tl.SetFontWeight(
                 DWRITE_FONT_WEIGHT_MEDIUM,
@@ -1693,18 +1681,12 @@ impl SpriteListPaneView {
 
         let composition_properties = init.subsystem.compositor.CreatePropertySet().unwrap();
         composition_properties
-            .Properties()
-            .unwrap()
             .InsertScalar(h!("ShownRate"), 1.0)
             .unwrap();
         composition_properties
-            .Properties()
-            .unwrap()
             .InsertScalar(h!("DPI"), init.dpi)
             .unwrap();
         composition_properties
-            .Properties()
-            .unwrap()
             .InsertScalar(h!("TopOffset"), 0.0)
             .unwrap();
 
@@ -1820,8 +1802,6 @@ impl SpriteListPaneView {
 
     pub fn set_top(&self, ht: &mut HitTestTreeContext, top: f32) {
         self.composition_properties
-            .Properties()
-            .unwrap()
             .InsertScalar(h!("TopOffset"), top)
             .unwrap();
         self.root
@@ -2428,6 +2408,86 @@ impl FileDragAndDropOverlayView {
     }
 }
 
+struct AppWindowHitTestTreeActionHandler {
+    grid_view: Rc<AtlasBaseGridView>,
+    drag_data: Cell<Option<(f32, f32, f32, f32)>>,
+    dpi: Cell<f32>,
+    ht_root: HitTestTreeRef,
+}
+impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+    ) -> EventContinueControl {
+        if sender == self.ht_root {
+            let dpi = self.dpi.get();
+            let (current_offset_x, current_offset_y) = self.grid_view.offset_pixels.get();
+            self.drag_data.set(Some((
+                current_offset_x,
+                current_offset_y,
+                dip_to_pixels(client_x, dpi),
+                dip_to_pixels(client_y, dpi),
+            )));
+
+            return EventContinueControl::STOP_PROPAGATION | EventContinueControl::CAPTURE_ELEMENT;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+        _client_width: f32,
+        _client_height: f32,
+    ) -> EventContinueControl {
+        if sender == self.ht_root {
+            if let Some((base_x, base_y, org_x, org_y)) = self.drag_data.get() {
+                let dpi = self.dpi.get();
+                let (dx, dy) = (
+                    org_x - dip_to_pixels(client_x, dpi),
+                    org_y - dip_to_pixels(client_y, dpi),
+                );
+                self.grid_view.set_offset(base_x + dx, base_y + dy);
+
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+    ) -> EventContinueControl {
+        if sender == self.ht_root {
+            if let Some((base_x, base_y, org_x, org_y)) = self.drag_data.replace(None) {
+                let dpi = self.dpi.get();
+                let (dx, dy) = (
+                    org_x - dip_to_pixels(client_x, dpi),
+                    org_y - dip_to_pixels(client_y, dpi),
+                );
+                self.grid_view.set_offset(base_x + dx, base_y + dy);
+            }
+
+            return EventContinueControl::STOP_PROPAGATION
+                | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
 struct AppWindowStateModel {
     ht: Rc<RefCell<HitTestTreeContext>>,
     ht_root: HitTestTreeRef,
@@ -2438,9 +2498,10 @@ struct AppWindowStateModel {
     composition_target: DesktopWindowTarget,
     composition_root: ContainerVisual,
     header_view: AppHeaderView,
-    grid_view: AtlasBaseGridView,
+    grid_view: Rc<AtlasBaseGridView>,
     sprite_list_pane: SpriteListPanePresenter,
     file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
+    app_window_ht_action_handler: Rc<AppWindowHitTestTreeActionHandler>,
 }
 impl AppWindowStateModel {
     pub fn new(
@@ -2476,7 +2537,6 @@ impl AppWindowStateModel {
                 .expect("negative size?"),
         };
         let dpi = unsafe { GetDpiForWindow(bound_hwnd) as f32 };
-        println!("init dpi: {dpi}");
         let mut dpi_handlers = Vec::new();
         let pointer_input_manager = PointerInputManager::new();
 
@@ -2523,7 +2583,11 @@ impl AppWindowStateModel {
             app_state,
         };
 
-        let grid_view = AtlasBaseGridView::new(&mut presenter_init_context.for_view, 128, 128);
+        let grid_view = Rc::new(AtlasBaseGridView::new(
+            &mut presenter_init_context.for_view,
+            128,
+            128,
+        ));
         grid_view.mount(&composition_root.Children().unwrap());
         grid_view.resize(client_size_pixels.width, client_size_pixels.height);
 
@@ -2547,7 +2611,18 @@ impl AppWindowStateModel {
 
         sprite_list_pane.set_top(&mut ht.borrow_mut(), header_view.height());
 
+        let app_window_ht_action_handler = Rc::new(AppWindowHitTestTreeActionHandler {
+            grid_view: grid_view.clone(),
+            drag_data: Cell::new(None),
+            dpi: Cell::new(dpi),
+            ht_root,
+        });
+        ht.borrow_mut().get_mut(ht_root).action_handler =
+            Some(Rc::downgrade(&app_window_ht_action_handler) as _);
+
         ht.borrow().dump(ht_root);
+
+        tracing::info!({ dpi }, "window state initialized");
 
         Self {
             ht,
@@ -2562,6 +2637,7 @@ impl AppWindowStateModel {
             grid_view,
             sprite_list_pane,
             file_dnd_overlay,
+            app_window_ht_action_handler,
         }
     }
 
@@ -2620,6 +2696,8 @@ impl AppWindowStateModel {
                 x.on_dpi_changed(new_dpi as _);
             }
         }
+
+        self.app_window_ht_action_handler.dpi.set(new_dpi as _);
     }
 
     pub fn resize(&mut self, new_width: u16, new_height: u16) {
@@ -2771,6 +2849,7 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
                 panic!("DragQueryFileW(querying file path) failed");
             }
 
+            // strip nul-character
             let path = PathBuf::from(OsString::from_wide(&path[..path.len() - 1]));
             if path.is_dir() {
                 // process all files in directory(rec)
@@ -2807,7 +2886,6 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
                 let mut fs = std::fs::File::open(&path).unwrap();
                 let png_meta = source_reader::png::Metadata::try_read(&mut fs).expect("not a png?");
 
-                // strip nul-character
                 sprites.push(SpriteInfo {
                     name: path.file_stem().unwrap().to_str().unwrap().into(),
                     source_path: path,

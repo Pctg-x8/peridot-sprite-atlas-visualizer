@@ -4,9 +4,9 @@ use core::{
 };
 use std::collections::HashMap;
 use windows::{
-    core::{h, implement, w, Interface},
     Foundation::Size,
     Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat},
+    UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice, Compositor},
     Win32::{
         Foundation::HMODULE,
         Graphics::{
@@ -14,26 +14,26 @@ use windows::{
                 CreatePresentationFactory, IPresentationFactory, IPresentationManager,
             },
             Direct2D::{
-                D2D1CreateFactory, ID2D1Device, ID2D1Factory1, D2D1_DEBUG_LEVEL_WARNING,
-                D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                D2D1_DEBUG_LEVEL_WARNING, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                D2D1CreateFactory, ID2D1Device, ID2D1Factory1,
             },
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
-                D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
+                D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
             },
             DirectWrite::{
-                DWriteCreateFactory, IDWriteFactory, IDWriteFactory1, IDWriteFontCollection,
-                IDWriteFontCollectionLoader, IDWriteFontCollectionLoader_Impl,
-                IDWriteFontFileEnumerator, IDWriteFontFileEnumerator_Impl, IDWriteTextFormat,
                 DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_WEIGHT_NORMAL, DWriteCreateFactory, IDWriteFactory, IDWriteFactory1,
+                IDWriteFontCollection, IDWriteFontCollectionLoader,
+                IDWriteFontCollectionLoader_Impl, IDWriteFontFileEnumerator,
+                IDWriteFontFileEnumerator_Impl, IDWriteTextFormat, IDWriteTextLayout,
             },
             Dxgi::IDXGIDevice,
         },
         System::WinRT::Composition::{ICompositorDesktopInterop, ICompositorInterop},
     },
-    UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice, Compositor},
+    core::{Interface, h, implement, w},
 };
 use windows_core::{BOOL, HSTRING};
 
@@ -259,6 +259,23 @@ impl Subsystem {
         }
     }
 
+    #[inline]
+    pub fn new_text_layout_unrestricted(
+        &self,
+        text: &str,
+        format: impl windows_core::Param<IDWriteTextFormat>,
+    ) -> windows_core::Result<IDWriteTextLayout> {
+        unsafe {
+            self.dwrite_factory.CreateTextLayout(
+                &text.encode_utf16().collect::<Vec<_>>(),
+                format,
+                f32::MAX,
+                f32::MAX,
+            )
+        }
+    }
+
+    #[inline]
     pub fn new_2d_drawing_surface(
         &self,
         size: Size,

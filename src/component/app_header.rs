@@ -1,21 +1,22 @@
 use windows::{
     Foundation::Size,
+    UI::Composition::{CompositionEffectSourceParameter, ContainerVisual, VisualCollection},
     Win32::{
         Graphics::Direct2D::{
-            Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_POINT_2F},
-            ID2D1DeviceContext, ID2D1RenderTarget, ID2D1SolidColorBrush,
+            Common::{D2D_POINT_2F, D2D1_COLOR_F, D2D1_GRADIENT_STOP},
             D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-            D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES,
+            D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, ID2D1DeviceContext, ID2D1RenderTarget,
+            ID2D1SolidColorBrush,
         },
         System::WinRT::Composition::ICompositionDrawingSurfaceInterop,
         UI::WindowsAndMessaging::{HTCAPTION, HTCLOSE, HTMINBUTTON},
     },
-    UI::Composition::{CompositionEffectSourceParameter, ContainerVisual, VisualCollection},
 };
-use windows_core::{h, Interface};
+use windows_core::{Interface, h};
 use windows_numerics::{Vector2, Vector3};
 
 use crate::{
+    D2D1_COLOR_F_WHITE, PointDIP, RectDIP, ViewInitContext,
     composition_element_builder::{
         CompositionColorGradientStopParams, CompositionLinearGradientBrushParams,
         CompositionMaskBrushParams, CompositionSurfaceBrushParams, ContainerVisualParams,
@@ -24,7 +25,7 @@ use crate::{
     create_instant_effect_brush,
     effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams},
     extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite,
-    scoped_try, PointDIP, RectDIP, ViewInitContext, D2D1_COLOR_F_WHITE,
+    scoped_try,
 };
 
 #[inline(always)]
@@ -580,17 +581,10 @@ pub struct AppHeaderView {
 }
 impl AppHeaderView {
     pub fn new(init: &mut ViewInitContext, init_label: &str) -> Self {
-        let tl = unsafe {
-            init.subsystem
-                .dwrite_factory
-                .CreateTextLayout(
-                    &init_label.encode_utf16().collect::<Vec<_>>(),
-                    &init.subsystem.default_ui_format,
-                    f32::MAX,
-                    f32::MAX,
-                )
-                .unwrap()
-        };
+        let tl = init
+            .subsystem
+            .new_text_layout_unrestricted(init_label, &init.subsystem.default_ui_format)
+            .unwrap();
         let mut tm = core::mem::MaybeUninit::uninit();
         unsafe {
             tl.GetMetrics(tm.as_mut_ptr()).unwrap();
