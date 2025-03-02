@@ -1546,8 +1546,8 @@ impl CurrentSelectedSpriteMarkerView {
             .InsertKeyFrame(
                 0.0,
                 Vector3 {
-                    X: 1.5,
-                    Y: 1.5,
+                    X: 1.3,
+                    Y: 1.3,
                     Z: 1.0,
                 },
             )
@@ -1565,7 +1565,7 @@ impl CurrentSelectedSpriteMarkerView {
                     .compositor
                     .CreateCubicBezierEasingFunction(
                         Vector2 { X: 0.0, Y: 0.0 },
-                        Vector2 { X: 0.25, Y: 1.0 },
+                        Vector2 { X: 0.0, Y: 1.0 },
                     )
                     .unwrap(),
             )
@@ -1591,9 +1591,9 @@ impl CurrentSelectedSpriteMarkerView {
             .unwrap();
         focus_opacity_animation.SetTarget(h!("Opacity")).unwrap();
 
-        focus_scale_animation.SetDuration(timespan_ms(250)).unwrap();
+        focus_scale_animation.SetDuration(timespan_ms(150)).unwrap();
         focus_opacity_animation
-            .SetDuration(timespan_ms(250))
+            .SetDuration(timespan_ms(150))
             .unwrap();
         let focus_animation = init.subsystem.compositor.CreateAnimationGroup().unwrap();
         focus_animation.Add(&focus_scale_animation).unwrap();
@@ -2965,6 +2965,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         client_width: f32,
         client_height: f32,
     ) -> EventContinueControl {
+        if sender == self.view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view.on_hover();
 
@@ -3004,6 +3008,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         _client_width: f32,
         _client_height: f32,
     ) -> EventContinueControl {
+        if sender == self.view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.toggle_button_view.ht_root {
             self.toggle_button_view.on_hover_leave();
 
@@ -3028,6 +3036,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         client_x: f32,
         _client_y: f32,
     ) -> EventContinueControl {
+        if sender == self.view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             self.adjust_drag_state
                 .set(Some((client_x, self.view.width.get())));
@@ -3053,6 +3065,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         client_width: f32,
         client_height: f32,
     ) -> EventContinueControl {
+        if sender == self.view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             if let Some((base_x, base_width)) = self.adjust_drag_state.get() {
                 let new_width = (base_width + (client_x - base_x)).max(10.0);
@@ -3103,6 +3119,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         client_x: f32,
         _client_y: f32,
     ) -> EventContinueControl {
+        if sender == self.view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             if let Some((base_x, base_width)) = self.adjust_drag_state.replace(None) {
                 let new_width = (base_width + (client_x - base_x)).max(10.0);
@@ -3131,6 +3151,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         client_width: f32,
         client_height: f32,
     ) -> EventContinueControl {
+        if sender == self.view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.toggle_button_view.ht_root {
             let hidden = !self.hidden.get();
             self.hidden.set(hidden);
@@ -3294,6 +3318,11 @@ impl SpriteListPanePresenter {
             adjust_drag_state: Cell::new(None),
             app_state: Rc::downgrade(init.app_state),
         });
+        init.for_view
+            .ht
+            .borrow_mut()
+            .get_mut(view.ht_root)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
         init.for_view
             .ht
             .borrow_mut()
