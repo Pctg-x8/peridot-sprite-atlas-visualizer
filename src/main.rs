@@ -19,7 +19,9 @@ use composition_element_builder::{
     ContainerVisualParams, SimpleScalarAnimationParams, SpriteVisualParams,
 };
 use crossbeam::deque::{Injector, Worker};
-use effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams};
+use effect_builder::{
+    ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams, TintEffectParams,
+};
 use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
 use image::EncodableLayout;
@@ -31,8 +33,8 @@ use windows::{
     UI::{
         Color,
         Composition::{
-            CompositionBrush, CompositionDrawingSurface, CompositionEasingFunction,
-            CompositionEasingFunctionMode, CompositionEffectBrush,
+            CompositionAnimationGroup, CompositionBrush, CompositionDrawingSurface,
+            CompositionEasingFunction, CompositionEasingFunctionMode, CompositionEffectBrush,
             CompositionEffectSourceParameter, CompositionPropertySet, CompositionStretch,
             ContainerVisual, Desktop::DesktopWindowTarget, ScalarKeyFrameAnimation, SpriteVisual,
             VisualCollection,
@@ -1453,6 +1455,237 @@ const D2D1_COLOR_F_WHITE: D2D1_COLOR_F = D2D1_COLOR_F {
     a: 1.0,
 };
 
+pub struct CurrentSelectedSpriteMarkerView {
+    root: SpriteVisual,
+    composition_properties: CompositionPropertySet,
+    focus_animation: CompositionAnimationGroup,
+}
+impl CurrentSelectedSpriteMarkerView {
+    const CORNER_RADIUS: f32 = 4.0;
+    const THICKNESS: f32 = 2.0;
+    const COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
+        r: 0.0,
+        g: 1.0,
+        b: 0.0,
+        a: 1.0,
+    };
+
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let surface = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: init.dip_to_pixels(Self::CORNER_RADIUS * 2.0 + 1.0),
+                Height: init.dip_to_pixels(Self::CORNER_RADIUS * 2.0 + 1.0),
+            })
+            .unwrap();
+        {
+            let interop: ICompositionDrawingSurfaceInterop = surface.cast().unwrap();
+            let mut offset = MaybeUninit::uninit();
+            let dc: ID2D1DeviceContext =
+                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
+            let offset = unsafe { offset.assume_init() };
+            let r = 'drawing: {
+                unsafe {
+                    dc.SetDpi(init.dpi, init.dpi);
+                    dc.SetTransform(&Matrix3x2::translation(
+                        init.signed_pixels_to_dip(offset.x),
+                        init.signed_pixels_to_dip(offset.y),
+                    ));
+                }
+
+                let brush =
+                    scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&Self::COLOR, None) });
+
+                unsafe {
+                    dc.Clear(None);
+                    dc.DrawRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: Self::THICKNESS * 0.5,
+                                top: Self::THICKNESS * 0.5,
+                                right: Self::CORNER_RADIUS * 2.0 + 1.0 - Self::THICKNESS * 0.5,
+                                bottom: Self::CORNER_RADIUS * 2.0 + 1.0 - Self::THICKNESS * 0.5,
+                            },
+                            radiusX: Self::CORNER_RADIUS,
+                            radiusY: Self::CORNER_RADIUS,
+                        },
+                        &brush,
+                        Self::THICKNESS,
+                        None,
+                    );
+                }
+
+                Ok(())
+            };
+            unsafe {
+                interop.EndDraw().unwrap();
+            }
+            r.unwrap();
+        }
+
+        let root = SpriteVisualParams::new(
+            &CompositionNineGridBrushParams::new(
+                &CompositionSurfaceBrushParams::new(&surface)
+                    .stretch(CompositionStretch::Fill)
+                    .instantiate(&init.subsystem.compositor)
+                    .unwrap(),
+            )
+            .insets(init.dip_to_pixels(Self::CORNER_RADIUS))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+        )
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let focus_scale_animation = init
+            .subsystem
+            .compositor
+            .CreateVector3KeyFrameAnimation()
+            .unwrap();
+        focus_scale_animation
+            .InsertKeyFrame(
+                0.0,
+                Vector3 {
+                    X: 1.5,
+                    Y: 1.5,
+                    Z: 1.0,
+                },
+            )
+            .unwrap();
+        focus_scale_animation
+            .InsertKeyFrameWithEasingFunction(
+                1.0,
+                Vector3 {
+                    X: 1.0,
+                    Y: 1.0,
+                    Z: 1.0,
+                },
+                &init
+                    .subsystem
+                    .compositor
+                    .CreateCubicBezierEasingFunction(
+                        Vector2 { X: 0.0, Y: 0.0 },
+                        Vector2 { X: 0.25, Y: 1.0 },
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+        focus_scale_animation.SetTarget(h!("Scale")).unwrap();
+
+        let focus_opacity_animation = init
+            .subsystem
+            .compositor
+            .CreateScalarKeyFrameAnimation()
+            .unwrap();
+        focus_opacity_animation.InsertKeyFrame(0.0, 0.0).unwrap();
+        focus_opacity_animation
+            .InsertKeyFrameWithEasingFunction(
+                1.0,
+                1.0,
+                &init
+                    .subsystem
+                    .compositor
+                    .CreateLinearEasingFunction()
+                    .unwrap(),
+            )
+            .unwrap();
+        focus_opacity_animation.SetTarget(h!("Opacity")).unwrap();
+
+        focus_scale_animation.SetDuration(timespan_ms(250)).unwrap();
+        focus_opacity_animation
+            .SetDuration(timespan_ms(250))
+            .unwrap();
+        let focus_animation = init.subsystem.compositor.CreateAnimationGroup().unwrap();
+        focus_animation.Add(&focus_scale_animation).unwrap();
+        focus_animation.Add(&focus_opacity_animation).unwrap();
+
+        let composition_properties = init.subsystem.compositor.CreatePropertySet().unwrap();
+        composition_properties
+            .InsertVector3(
+                h!("GlobalPos"),
+                Vector3 {
+                    X: 0.0,
+                    Y: 0.0,
+                    Z: 0.0,
+                },
+            )
+            .unwrap();
+        composition_properties
+            .InsertVector3(
+                h!("ViewOffset"),
+                Vector3 {
+                    X: 0.0,
+                    Y: 0.0,
+                    Z: 0.0,
+                },
+            )
+            .unwrap();
+
+        let root_offset_expr = init
+            .subsystem
+            .compositor
+            .CreateExpressionAnimationWithExpression(h!("cp.GlobalPos + cp.ViewOffset"))
+            .unwrap();
+        root_offset_expr
+            .SetExpressionReferenceParameter(h!("cp"), &composition_properties)
+            .unwrap();
+        root.StartAnimation(h!("Offset"), &root_offset_expr)
+            .unwrap();
+
+        Self {
+            root,
+            composition_properties,
+            focus_animation,
+        }
+    }
+
+    pub fn mount(&self, children: &VisualCollection) {
+        children.InsertAtTop(&self.root).unwrap();
+    }
+
+    pub fn focus(&self, x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) {
+        self.composition_properties
+            .InsertVector3(
+                h!("GlobalPos"),
+                Vector3 {
+                    X: x_pixels,
+                    Y: y_pixels,
+                    Z: 0.0,
+                },
+            )
+            .unwrap();
+        self.root
+            .SetSize(Vector2 {
+                X: width_pixels,
+                Y: height_pixels,
+            })
+            .unwrap();
+        self.root
+            .SetCenterPoint(Vector3 {
+                X: width_pixels * 0.5,
+                Y: height_pixels * 0.5,
+                Z: 0.0,
+            })
+            .unwrap();
+        self.root
+            .StartAnimationGroup(&self.focus_animation)
+            .unwrap();
+    }
+
+    pub fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
+        self.composition_properties
+            .InsertVector3(
+                h!("ViewOffset"),
+                Vector3 {
+                    X: -offset_x_pixels,
+                    Y: -offset_y_pixels,
+                    Z: 0.0,
+                },
+            )
+            .unwrap();
+    }
+}
+
 pub struct SpriteListToggleButtonView {
     root: ContainerVisual,
     bg: SpriteVisual,
@@ -1827,6 +2060,7 @@ impl SpriteListToggleButtonView {
 pub struct SpriteListCellView {
     root: ContainerVisual,
     bg: SpriteVisual,
+    bg_select: SpriteVisual,
     label: SpriteVisual,
     top: Cell<f32>,
     dpi: Cell<f32>,
@@ -1860,7 +2094,7 @@ impl SpriteListCellView {
 
             let brush = scoped_try!(
                 'drawing,
-                unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.875, g: 0.875, b: 0.875, a: 0.25 }, None) }
+                unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None) }
             );
 
             let offs_dip = D2D_POINT_2F {
@@ -1950,6 +2184,16 @@ impl SpriteListCellView {
             r.unwrap();
         }
 
+        let bg_base_brush = CompositionNineGridBrushParams::new(
+            &CompositionSurfaceBrushParams::new(&frame_tex)
+                .stretch(CompositionStretch::Fill)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .insets(init.dip_to_pixels(Self::CORNER_RADIUS))
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
         let root = ContainerVisualParams::new()
             .size(Vector2 {
                 X: init.dip_to_pixels(
@@ -1966,14 +2210,43 @@ impl SpriteListCellView {
             .instantiate(&init.subsystem.compositor)
             .unwrap();
         let bg = SpriteVisualParams::new(
-            &CompositionNineGridBrushParams::new(
-                &CompositionSurfaceBrushParams::new(&frame_tex)
-                    .stretch(CompositionStretch::Fill)
-                    .instantiate(&init.subsystem.compositor)
-                    .unwrap(),
+            &create_instant_effect_brush(
+                &init.subsystem,
+                &TintEffectParams {
+                    source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                    color: Some(windows::UI::Color {
+                        A: 32,
+                        R: 224,
+                        G: 224,
+                        B: 224,
+                    }),
+                }
+                .instantiate()
+                .unwrap(),
+                &[(h!("source"), bg_base_brush.cast().unwrap())],
             )
-            .insets(init.dip_to_pixels(Self::CORNER_RADIUS))
-            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+        )
+        .expand()
+        .opacity(0.0)
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let bg_select = SpriteVisualParams::new(
+            &create_instant_effect_brush(
+                &init.subsystem,
+                &TintEffectParams {
+                    source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                    color: Some(windows::UI::Color {
+                        A: 64,
+                        R: 64,
+                        G: 160,
+                        B: 255,
+                    }),
+                }
+                .instantiate()
+                .unwrap(),
+                &[(h!("source"), bg_base_brush.cast().unwrap())],
+            )
             .unwrap(),
         )
         .expand()
@@ -1998,6 +2271,7 @@ impl SpriteListCellView {
         .unwrap();
 
         let children = root.Children().unwrap();
+        children.InsertAtTop(&bg_select).unwrap();
         children.InsertAtTop(&bg).unwrap();
         children.InsertAtTop(&label).unwrap();
 
@@ -2035,10 +2309,14 @@ impl SpriteListCellView {
             .Insert(h!("Opacity"), &opacity_transition)
             .unwrap();
         bg.SetImplicitAnimations(&bg_implicit_animations).unwrap();
+        bg_select
+            .SetImplicitAnimations(&bg_implicit_animations)
+            .unwrap();
 
         Self {
             root,
             bg,
+            bg_select,
             label,
             top: Cell::new(init_top),
             dpi: Cell::new(init.dpi),
@@ -2060,11 +2338,19 @@ impl SpriteListCellView {
     }
 
     pub fn on_hover(&self) {
-        self.bg.SetOpacity(0.5).unwrap();
+        self.bg.SetOpacity(1.0).unwrap();
     }
 
     pub fn on_leave(&self) {
         self.bg.SetOpacity(0.0).unwrap();
+    }
+
+    pub fn on_select(&self) {
+        self.bg_select.SetOpacity(1.0).unwrap();
+    }
+
+    pub fn on_deselect(&self) {
+        self.bg_select.SetOpacity(0.0).unwrap();
     }
 
     pub fn set_top(&self, top: f32) {
@@ -2658,6 +2944,7 @@ pub struct SpriteListPaneHitActionHandler {
     pub active_cell_index: Cell<Option<usize>>,
     pub hidden: Cell<bool>,
     adjust_drag_state: Cell<Option<(f32, f32)>>,
+    app_state: std::rc::Weak<RefCell<AppState>>,
 }
 impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn cursor(&self, sender: HitTestTreeRef) -> Option<HCURSOR> {
@@ -2839,6 +3126,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         &self,
         sender: HitTestTreeRef,
         ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
     ) -> EventContinueControl {
         if sender == self.toggle_button_view.ht_root {
             let hidden = !self.hidden.get();
@@ -2854,6 +3145,35 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
 
             return EventContinueControl::STOP_PROPAGATION
                 | EventContinueControl::RECOMPUTE_POINTER_ENTER;
+        }
+
+        if sender == self.view.ht_cell_area {
+            let Some(app_state) = self.app_state.upgrade() else {
+                // app teardown-ed
+                return EventContinueControl::empty();
+            };
+
+            let (_, local_y, _, _) = ht.translate_client_to_tree_local(
+                sender,
+                client_x,
+                client_y,
+                client_width,
+                client_height,
+            );
+
+            let click_index = (local_y / SpriteListCellView::CELL_HEIGHT).trunc();
+            let click_index =
+                if 0.0 <= click_index && click_index < self.cell_views.borrow().len() as f32 {
+                    Some(click_index as usize)
+                } else {
+                    None
+                };
+
+            if let Some(x) = click_index {
+                app_state.borrow_mut().select_sprite(x);
+            }
+
+            return EventContinueControl::STOP_PROPAGATION;
         }
 
         EventContinueControl::empty()
@@ -2923,9 +3243,10 @@ impl SpriteListPanePresenter {
                     };
 
                     sprite_list_contents.clear();
-                    sprite_list_contents.extend(sprites.iter().map(|x| x.name.clone()));
+                    sprite_list_contents
+                        .extend(sprites.iter().map(|x| (x.name.clone(), x.selected)));
                     let visible_contents = &sprite_list_contents[..];
-                    for (n, c) in visible_contents.iter().enumerate() {
+                    for (n, &(ref c, sel)) in visible_contents.iter().enumerate() {
                         if sprite_list_cells.borrow().len() == n {
                             // create new one
                             let new_cell = SpriteListCellView::new(
@@ -2943,6 +3264,9 @@ impl SpriteListPanePresenter {
                                     + n as f32 * SpriteListCellView::CELL_HEIGHT,
                             );
                             new_cell.mount(&view.root.Children().unwrap());
+                            if sel {
+                                new_cell.on_select();
+                            }
                             sprite_list_cells.borrow_mut().push(new_cell);
                             continue;
                         }
@@ -2952,6 +3276,11 @@ impl SpriteListPanePresenter {
                             SpriteListPaneView::CELL_AREA_PADDINGS.top
                                 + n as f32 * SpriteListCellView::CELL_HEIGHT,
                         );
+                        if sel {
+                            sprite_list_cells.borrow()[n].on_select();
+                        } else {
+                            sprite_list_cells.borrow()[n].on_deselect();
+                        }
                     }
                 }
             }));
@@ -2963,6 +3292,7 @@ impl SpriteListPanePresenter {
             active_cell_index: Cell::new(None),
             hidden: Cell::new(false),
             adjust_drag_state: Cell::new(None),
+            app_state: Rc::downgrade(init.app_state),
         });
         init.for_view
             .ht
@@ -3237,6 +3567,7 @@ impl FileDragAndDropOverlayView {
 
 struct AppWindowHitTestTreeActionHandler {
     grid_view: Rc<AtlasBaseGridView>,
+    selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     drag_data: Cell<Option<(f32, f32, f32, f32)>>,
     dpi: Cell<f32>,
     ht_root: HitTestTreeRef,
@@ -3282,6 +3613,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                     org_y - dip_to_pixels(client_y, dpi),
                 );
                 self.grid_view.set_offset(base_x + dx, base_y + dy);
+                self.selected_sprite_marker_view
+                    .set_view_offset(base_x + dx, base_y + dy);
 
                 return EventContinueControl::STOP_PROPAGATION;
             }
@@ -3305,6 +3638,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                     org_y - dip_to_pixels(client_y, dpi),
                 );
                 self.grid_view.set_offset(base_x + dx, base_y + dy);
+                self.selected_sprite_marker_view
+                    .set_view_offset(base_x + dx, base_y + dy);
             }
 
             return EventContinueControl::STOP_PROPAGATION
@@ -3328,6 +3663,7 @@ struct AppWindowPresenter {
     root: ContainerVisual,
     ht_root: HitTestTreeRef,
     grid_view: Rc<AtlasBaseGridView>,
+    selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     sprite_list_pane: SpriteListPanePresenter,
     header_view: AppHeaderView,
     file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
@@ -3373,6 +3709,9 @@ impl AppWindowPresenter {
             init_client_size_pixels.height,
         );
 
+        let selected_sprite_marker_view =
+            Rc::new(CurrentSelectedSpriteMarkerView::new(&mut init.for_view));
+
         let sprite_list_pane = SpriteListPanePresenter::new(init);
 
         let header_view =
@@ -3385,6 +3724,7 @@ impl AppWindowPresenter {
 
         root.Children().unwrap().InsertAtBottom(&bg).unwrap();
         grid_view.mount(&root.Children().unwrap());
+        selected_sprite_marker_view.mount(&root.Children().unwrap());
         sprite_list_pane.mount(
             &root.Children().unwrap(),
             &mut init.for_view.ht.borrow_mut(),
@@ -3395,6 +3735,7 @@ impl AppWindowPresenter {
 
         let ht_action_handler = Rc::new(AppWindowHitTestTreeActionHandler {
             grid_view: grid_view.clone(),
+            selected_sprite_marker_view: selected_sprite_marker_view.clone(),
             drag_data: Cell::new(None),
             dpi: Cell::new(init.for_view.dpi),
             ht_root,
@@ -3415,14 +3756,35 @@ impl AppWindowPresenter {
             .sprites_update_callbacks
             .push(Box::new({
                 let grid_view = Rc::downgrade(&grid_view);
+                let selected_sprite_marker_view = Rc::downgrade(&selected_sprite_marker_view);
+                let mut last_selected_index = None;
 
                 move |sprites| {
                     let Some(grid_view) = grid_view.upgrade() else {
                         // parent teardown-ed
                         return;
                     };
+                    let Some(selected_sprite_marker_view) = selected_sprite_marker_view.upgrade()
+                    else {
+                        // parent teardown-ed
+                        return;
+                    };
 
                     grid_view.update_sprites(sprites);
+
+                    // TODO: Model的には複数選択できる形にしてるけどViewはどうしようか......
+                    let selected_index = sprites.iter().position(|x| x.selected);
+                    if selected_index != last_selected_index {
+                        last_selected_index = selected_index;
+                        if let Some(x) = selected_index {
+                            selected_sprite_marker_view.focus(
+                                sprites[x].left as _,
+                                sprites[x].top as _,
+                                sprites[x].width as _,
+                                sprites[x].height as _,
+                            );
+                        }
+                    }
                 }
             }));
 
@@ -3430,6 +3792,7 @@ impl AppWindowPresenter {
             root,
             ht_root,
             grid_view,
+            selected_sprite_marker_view,
             sprite_list_pane,
             header_view,
             file_dnd_overlay,
@@ -3753,6 +4116,7 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
                         right_slice: 0,
                         top_slice: 0,
                         bottom_slice: 0,
+                        selected: false,
                     });
                 }
             } else {
@@ -3770,6 +4134,7 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
                     right_slice: 0,
                     top_slice: 0,
                     bottom_slice: 0,
+                    selected: false,
                 });
             }
         }
@@ -3844,6 +4209,7 @@ pub struct SpriteInfo {
     pub right_slice: u32,
     pub top_slice: u32,
     pub bottom_slice: u32,
+    pub selected: bool,
 }
 
 pub struct AppState {
@@ -3855,8 +4221,19 @@ pub struct AppState {
 impl AppState {
     pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {
         self.sprites.extend(sprites);
-        for x in self.sprites_update_callbacks.iter_mut() {
-            x(&self.sprites);
+
+        for cb in self.sprites_update_callbacks.iter_mut() {
+            cb(&self.sprites);
+        }
+    }
+
+    pub fn select_sprite(&mut self, index: usize) {
+        for (n, x) in self.sprites.iter_mut().enumerate() {
+            x.selected = n == index;
+        }
+
+        for cb in self.sprites_update_callbacks.iter_mut() {
+            cb(&self.sprites);
         }
     }
 }

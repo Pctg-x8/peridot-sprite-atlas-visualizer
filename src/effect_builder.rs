@@ -3,7 +3,7 @@ use windows_core::HSTRING;
 
 use crate::extra_bindings::Microsoft::Graphics::Canvas::{
     CanvasComposite,
-    Effects::{ColorSourceEffect, CompositeEffect, GaussianBlurEffect},
+    Effects::{ColorSourceEffect, CompositeEffect, GaussianBlurEffect, TintEffect},
 };
 
 pub struct GaussianBlurEffectParams<'s, Source> {
@@ -61,6 +61,26 @@ impl CompositeEffectParams<'_> {
         }
         if let Some(p) = self.mode {
             x.SetMode(p)?;
+        }
+
+        Ok(x)
+    }
+}
+
+pub struct TintEffectParams<Source> {
+    pub source: Source,
+    pub color: Option<windows::UI::Color>,
+}
+impl<Source> TintEffectParams<Source>
+where
+    Source: windows_core::Param<IGraphicsEffectSource>,
+{
+    #[inline]
+    pub fn instantiate(self) -> windows_core::Result<TintEffect> {
+        let x = TintEffect::new()?;
+        x.SetSource(self.source)?;
+        if let Some(p) = self.color {
+            x.SetColor(p)?;
         }
 
         Ok(x)

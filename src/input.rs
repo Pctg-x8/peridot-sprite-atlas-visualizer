@@ -301,10 +301,19 @@ impl PointerInputManager {
         if self.click_base_client_pointer_pos.take().is_some() {
             match self.pointer_focus {
                 PointerFocusState::Capturing(tr) => {
-                    let flags = ht
-                        .get(tr)
-                        .action_handler()
-                        .map_or(EventContinueControl::empty(), |a| a.on_click(tr, ht));
+                    let flags =
+                        ht.get(tr)
+                            .action_handler()
+                            .map_or(EventContinueControl::empty(), |a| {
+                                a.on_click(
+                                    tr,
+                                    ht,
+                                    client_x,
+                                    client_y,
+                                    client_size.Width,
+                                    client_size.Height,
+                                )
+                            });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                         self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
                     }
@@ -323,8 +332,16 @@ impl PointerInputManager {
                         let t = ht.get(tr);
                         let next = t.parent;
                         let action_handler = t.action_handler();
-                        let flags = action_handler
-                            .map_or(EventContinueControl::empty(), |a| a.on_click(tr, ht));
+                        let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
+                            a.on_click(
+                                tr,
+                                ht,
+                                client_x,
+                                client_y,
+                                client_size.Width,
+                                client_size.Height,
+                            )
+                        });
                         if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                             self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
                         }

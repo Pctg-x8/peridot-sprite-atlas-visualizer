@@ -109,6 +109,8 @@ fn main() {
         "--filter",
         "Microsoft.Graphics.Canvas.Effects.CompositeEffect",
         "--filter",
+        "Microsoft.Graphics.Canvas.Effects.TintEffect",
+        "--filter",
         "Microsoft.Graphics.Canvas.CanvasComposite",
     ]);
 

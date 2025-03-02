@@ -825,6 +825,298 @@ pub mod Microsoft {
                     )
                         -> windows_core::HRESULT,
                 }
+                windows_core::imp::define_interface!(
+                    ITintEffect,
+                    ITintEffect_Vtbl,
+                    0x729a21ea_c61e_5308_9eae_d638aa1f5b8c
+                );
+                impl windows_core::RuntimeType for ITintEffect {
+                    const SIGNATURE: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::for_interface::<Self>();
+                }
+                #[repr(C)]
+                pub struct ITintEffect_Vtbl {
+                    pub base__: windows_core::IInspectable_Vtbl,
+                    pub Color: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut windows::UI::Color,
+                    )
+                        -> windows_core::HRESULT,
+                    pub SetColor: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        windows::UI::Color,
+                    )
+                        -> windows_core::HRESULT,
+                    pub ClampOutput: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut bool,
+                    )
+                        -> windows_core::HRESULT,
+                    pub SetClampOutput: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        bool,
+                    )
+                        -> windows_core::HRESULT,
+                    pub ColorHdr: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut windows_numerics::Vector4,
+                    )
+                        -> windows_core::HRESULT,
+                    pub SetColorHdr: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        windows_numerics::Vector4,
+                    )
+                        -> windows_core::HRESULT,
+                    pub Source: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut *mut core::ffi::c_void,
+                    )
+                        -> windows_core::HRESULT,
+                    pub SetSource: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut core::ffi::c_void,
+                    )
+                        -> windows_core::HRESULT,
+                }
+                windows_core::imp::define_interface!(
+                    ITintEffectStatics,
+                    ITintEffectStatics_Vtbl,
+                    0x65e31771_4baf_5c8c_93f4_3b874e29f68d
+                );
+                impl windows_core::RuntimeType for ITintEffectStatics {
+                    const SIGNATURE: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::for_interface::<Self>();
+                }
+                #[repr(C)]
+                pub struct ITintEffectStatics_Vtbl {
+                    pub base__: windows_core::IInspectable_Vtbl,
+                    pub IsSupported: unsafe extern "system" fn(
+                        *mut core::ffi::c_void,
+                        *mut bool,
+                    )
+                        -> windows_core::HRESULT,
+                }
+                #[repr(transparent)]
+                #[derive(Clone, Debug, Eq, PartialEq)]
+                pub struct TintEffect(windows_core::IUnknown);
+                windows_core::imp::interface_hierarchy!(
+                    TintEffect,
+                    windows_core::IUnknown,
+                    windows_core::IInspectable
+                );
+                windows_core::imp::required_hierarchy!(
+                    TintEffect,
+                    ICanvasEffect,
+                    super::ICanvasImage,
+                    super::super::super::super::Windows::Foundation::IClosable,
+                    windows::Graphics::Effects::IGraphicsEffect,
+                    windows::Graphics::Effects::IGraphicsEffectSource
+                );
+                impl TintEffect {
+                    pub fn new() -> windows_core::Result<Self> {
+                        Self::IActivationFactory(|f| f.ActivateInstance::<Self>())
+                    }
+                    fn IActivationFactory<
+                        R,
+                        F: FnOnce(&windows_core::imp::IGenericFactory) -> windows_core::Result<R>,
+                    >(
+                        callback: F,
+                    ) -> windows_core::Result<R> {
+                        static SHARED: windows_core::imp::FactoryCache<
+                            TintEffect,
+                            windows_core::imp::IGenericFactory,
+                        > = windows_core::imp::FactoryCache::new();
+                        SHARED.call(callback)
+                    }
+                    pub fn CacheOutput(&self) -> windows_core::Result<bool> {
+                        let this = &windows_core::Interface::cast::<ICanvasEffect>(self)?;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).CacheOutput)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| result__)
+                        }
+                    }
+                    pub fn SetCacheOutput(&self, value: bool) -> windows_core::Result<()> {
+                        let this = &windows_core::Interface::cast::<ICanvasEffect>(self)?;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetCacheOutput)(
+                                windows_core::Interface::as_raw(this),
+                                value,
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn Close(&self) -> windows_core::Result<()> {
+                        let this = &windows_core::Interface::cast::<
+                            super::super::super::super::Windows::Foundation::IClosable,
+                        >(self)?;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).Close)(
+                                windows_core::Interface::as_raw(this),
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn Name(&self) -> windows_core::Result<windows_core::HSTRING> {
+                        let this = &windows_core::Interface::cast::<
+                            windows::Graphics::Effects::IGraphicsEffect,
+                        >(self)?;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).Name)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| core::mem::transmute(result__))
+                        }
+                    }
+                    pub fn SetName(
+                        &self,
+                        name: &windows_core::HSTRING,
+                    ) -> windows_core::Result<()> {
+                        let this = &windows_core::Interface::cast::<
+                            windows::Graphics::Effects::IGraphicsEffect,
+                        >(self)?;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetName)(
+                                windows_core::Interface::as_raw(this),
+                                core::mem::transmute_copy(name),
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn Color(&self) -> windows_core::Result<windows::UI::Color> {
+                        let this = self;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).Color)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| result__)
+                        }
+                    }
+                    pub fn SetColor(&self, value: windows::UI::Color) -> windows_core::Result<()> {
+                        let this = self;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetColor)(
+                                windows_core::Interface::as_raw(this),
+                                value,
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn ClampOutput(&self) -> windows_core::Result<bool> {
+                        let this = self;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).ClampOutput)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| result__)
+                        }
+                    }
+                    pub fn SetClampOutput(&self, value: bool) -> windows_core::Result<()> {
+                        let this = self;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetClampOutput)(
+                                windows_core::Interface::as_raw(this),
+                                value,
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn ColorHdr(&self) -> windows_core::Result<windows_numerics::Vector4> {
+                        let this = self;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).ColorHdr)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| result__)
+                        }
+                    }
+                    pub fn SetColorHdr(
+                        &self,
+                        value: windows_numerics::Vector4,
+                    ) -> windows_core::Result<()> {
+                        let this = self;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetColorHdr)(
+                                windows_core::Interface::as_raw(this),
+                                value,
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn Source(
+                        &self,
+                    ) -> windows_core::Result<windows::Graphics::Effects::IGraphicsEffectSource>
+                    {
+                        let this = self;
+                        unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).Source)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .and_then(|| windows_core::Type::from_abi(result__))
+                        }
+                    }
+                    pub fn SetSource<P0>(&self, source: P0) -> windows_core::Result<()>
+                    where
+                        P0: windows_core::Param<windows::Graphics::Effects::IGraphicsEffectSource>,
+                    {
+                        let this = self;
+                        unsafe {
+                            (windows_core::Interface::vtable(this).SetSource)(
+                                windows_core::Interface::as_raw(this),
+                                source.param().abi(),
+                            )
+                            .ok()
+                        }
+                    }
+                    pub fn IsSupported() -> windows_core::Result<bool> {
+                        Self::ITintEffectStatics(|this| unsafe {
+                            let mut result__ = core::mem::zeroed();
+                            (windows_core::Interface::vtable(this).IsSupported)(
+                                windows_core::Interface::as_raw(this),
+                                &mut result__,
+                            )
+                            .map(|| result__)
+                        })
+                    }
+                    fn ITintEffectStatics<
+                        R,
+                        F: FnOnce(&ITintEffectStatics) -> windows_core::Result<R>,
+                    >(
+                        callback: F,
+                    ) -> windows_core::Result<R> {
+                        static SHARED: windows_core::imp::FactoryCache<
+                            TintEffect,
+                            ITintEffectStatics,
+                        > = windows_core::imp::FactoryCache::new();
+                        SHARED.call(callback)
+                    }
+                }
+                impl windows_core::RuntimeType for TintEffect {
+                    const SIGNATURE: windows_core::imp::ConstBuffer =
+                        windows_core::imp::ConstBuffer::for_class::<Self, ITintEffect>();
+                }
+                unsafe impl windows_core::Interface for TintEffect {
+                    type Vtable = <ITintEffect as windows_core::Interface>::Vtable;
+                    const IID: windows_core::GUID = <ITintEffect as windows_core::Interface>::IID;
+                }
+                impl windows_core::RuntimeName for TintEffect {
+                    const NAME: &'static str = "Microsoft.Graphics.Canvas.Effects.TintEffect";
+                }
+                unsafe impl Send for TintEffect {}
+                unsafe impl Sync for TintEffect {}
             }
         }
     }

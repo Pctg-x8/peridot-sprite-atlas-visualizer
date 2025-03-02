@@ -21,5 +21,5 @@ float4 main(Output o) : SV_Target {
     const float2 lv = smoothstep(1.0 - (1.0 / (renderParams.pixelSize / div / 2.0)), 1.0, xr);
     const float b = 1.0 - (1.0 - lv.x) * (1.0 - lv.y);
 
-    return lerp(float4(0.1, 0.1, 0.2, 1.0), float4(0.5, 0.5, 0.5, 1.0), 1.0 - (1.0 - b) * (1.0 - b0));
+    return lerp(float4(0.1, 0.1, 0.15, 1.0), float4(0.5, 0.5, 0.5, 1.0), 1.0 - (1.0 - b) * (1.0 - b0));
 }

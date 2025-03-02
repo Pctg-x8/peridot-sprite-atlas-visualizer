@@ -76,6 +76,10 @@ pub trait HitTestTreeActionHandler {
         &self,
         sender: HitTestTreeRef,
         ht: &mut HitTestTreeContext,
+        client_x: f32,
+        client_y: f32,
+        client_width: f32,
+        client_height: f32,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
