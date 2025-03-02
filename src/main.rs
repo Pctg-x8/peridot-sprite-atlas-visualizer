@@ -1,3 +1,4 @@
+use core::mem::MaybeUninit;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -50,13 +51,17 @@ use windows::{
             Direct3D11::{
                 D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
                 D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
-                D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CPU_ACCESS_WRITE, D3D11_MAP_WRITE_DISCARD,
-                D3D11_RENDER_TARGET_BLEND_DESC, D3D11_RENDER_TARGET_VIEW_DESC,
-                D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D,
-                D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-                D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE, D3D11_VIEWPORT, ID3D11BlendState,
-                ID3D11Buffer, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
-                ID3D11PixelShader, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+                D3D11_BOX, D3D11_BUFFER_DESC, D3D11_COMPARISON_ALWAYS, D3D11_CPU_ACCESS_READ,
+                D3D11_CPU_ACCESS_WRITE, D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_INPUT_ELEMENT_DESC,
+                D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE,
+                D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_BLEND_DESC,
+                D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
+                D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC, D3D11_SUBRESOURCE_DATA,
+                D3D11_TEX2D_RTV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC,
+                D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE,
+                D3D11_USAGE_STAGING, D3D11_VIEWPORT, ID3D11BlendState, ID3D11Buffer, ID3D11Device,
+                ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader,
+                ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
             },
             DirectWrite::{
                 DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_LIGHT, DWRITE_TEXT_RANGE,
@@ -68,7 +73,8 @@ use windows::{
             Dxgi::{
                 Common::{
                     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
-                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_SAMPLE_DESC,
+                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R32G32_FLOAT,
+                    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
                 },
                 DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -113,7 +119,7 @@ use windows::{
             },
         },
     },
-    core::{HRESULT, Interface, PCWSTR, h, w},
+    core::{HRESULT, Interface, PCWSTR, h, s, w},
 };
 use windows_core::{BOOL, HSTRING, implement};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
@@ -493,6 +499,7 @@ pub struct AtlasBaseGridRenderParams {
 
 pub struct SimpleTextureAtlas {
     pub resource: ID3D11Texture2D,
+    pub srv: ID3D11ShaderResourceView,
     pub current_top: u32,
     pub current_left: u32,
     pub max_height: u32,
@@ -502,6 +509,7 @@ impl SimpleTextureAtlas {
 
     pub fn new(d3d11: &ID3D11Device) -> Self {
         let mut resource = core::mem::MaybeUninit::uninit();
+        let mut srv = MaybeUninit::uninit();
         unsafe {
             d3d11
                 .CreateTexture2D(
@@ -524,11 +532,20 @@ impl SimpleTextureAtlas {
                     Some(resource.as_mut_ptr()),
                 )
                 .unwrap();
+            d3d11
+                .CreateShaderResourceView(
+                    resource.assume_init_ref().as_ref().unwrap(),
+                    None,
+                    Some(srv.as_mut_ptr()),
+                )
+                .unwrap();
         }
         let resource = unsafe { resource.assume_init().unwrap() };
+        let srv = unsafe { srv.assume_init().unwrap() };
 
         Self {
             resource,
+            srv,
             current_top: 0,
             current_left: 0,
             max_height: 0,
@@ -563,6 +580,12 @@ impl SimpleTextureAtlas {
     }
 }
 
+#[repr(C)]
+pub struct SpriteInstance {
+    pub pos_st: [f32; 4],
+    pub uv_st: [f32; 4],
+}
+
 pub struct AtlasBaseGridView {
     root: SpriteVisual,
     swapchain: IDXGISwapChain2,
@@ -571,20 +594,32 @@ pub struct AtlasBaseGridView {
     render_params_cb: ID3D11Buffer,
     texture_preview_vb: ID3D11Buffer,
     texture_preview_cb: ID3D11Buffer,
-    texture_preview_srv: ID3D11ShaderResourceView,
     texture_preview_vsh: ID3D11VertexShader,
     texture_preview_psh: ID3D11PixelShader,
+    sprite_instance_vsh: ID3D11VertexShader,
+    sprite_instance_psh: ID3D11PixelShader,
+    sprite_instance_base_vb: ID3D11Buffer,
+    sprite_instance_input_layout: ID3D11InputLayout,
+    sprite_instance_buffer: RefCell<ID3D11Buffer>,
+    sprite_instance_buffer_staging: RefCell<ID3D11Buffer>,
+    sprite_instance_buffer_capacity: Cell<usize>,
+    sprite_instance_count: Cell<usize>,
+    sprite_instance_buffer_dirty: Cell<bool>,
+    tex_sampler: ID3D11SamplerState,
     size_pixels: Cell<(u32, u32)>,
     resize_order: Cell<Option<(u32, u32)>>,
     offset_pixels: Cell<(f32, f32)>,
     background_worker_enqueue_access: BackgroundWorkerEnqueueWeakAccess,
     simple_atlas: RefCell<SimpleTextureAtlas>,
     sprite_source_offset: RefCell<HashMap<PathBuf, (u32, u32)>>,
+    d3d11_device: ID3D11Device,
     d3d11_device_context: ID3D11DeviceContext,
     d3d11_mt: ID3D11Multithread,
     premul_blend_state: ID3D11BlendState,
 }
 impl AtlasBaseGridView {
+    const SPRITE_INSTANCE_CAPACITY_UNIT: usize = 128;
+
     pub fn new(
         init: &mut ViewInitContext,
         init_width_pixels: u32,
@@ -719,12 +754,167 @@ impl AtlasBaseGridView {
         }
         let premul_blend_state = unsafe { premul_blend_state.assume_init().unwrap() };
 
+        let mut tex_sampler = core::mem::MaybeUninit::uninit();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateSamplerState(
+                    &D3D11_SAMPLER_DESC {
+                        Filter: D3D11_FILTER_MIN_MAG_MIP_POINT,
+                        AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                        AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                        AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                        MipLODBias: 0.0,
+                        MaxAnisotropy: 1,
+                        ComparisonFunc: D3D11_COMPARISON_ALWAYS,
+                        BorderColor: [0.0; 4],
+                        MinLOD: 0.0,
+                        MaxLOD: 0.0,
+                    },
+                    Some(tex_sampler.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let tex_sampler = unsafe { tex_sampler.assume_init().unwrap() };
+
         let simple_atlas = RefCell::new(SimpleTextureAtlas::new(&init.subsystem.d3d11_device));
 
         let d3d11_mt: ID3D11Multithread = init.subsystem.d3d11_imm_context.cast().unwrap();
         unsafe {
             let _ = d3d11_mt.SetMultithreadProtected(true);
         }
+
+        let mut sprite_instance_vsh = core::mem::MaybeUninit::uninit();
+        let mut sprite_instance_psh = core::mem::MaybeUninit::uninit();
+        let mut sprite_instance_input_layout = core::mem::MaybeUninit::uninit();
+        let vsh_code = std::fs::read("resources/sprite_instance/vsh.fxc").unwrap();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateVertexShader(&vsh_code, None, Some(sprite_instance_vsh.as_mut_ptr()))
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreatePixelShader(
+                    &std::fs::read("resources/sprite_instance/psh.fxc").unwrap(),
+                    None,
+                    Some(sprite_instance_psh.as_mut_ptr()),
+                )
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreateInputLayout(
+                    &[
+                        D3D11_INPUT_ELEMENT_DESC {
+                            SemanticName: s!("POSITION"),
+                            SemanticIndex: 0,
+                            Format: DXGI_FORMAT_R32G32_FLOAT,
+                            InputSlot: 0,
+                            AlignedByteOffset: 0,
+                            InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                            InstanceDataStepRate: 0,
+                        },
+                        D3D11_INPUT_ELEMENT_DESC {
+                            SemanticName: s!("POSITION"),
+                            SemanticIndex: 1,
+                            Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+                            InputSlot: 1,
+                            AlignedByteOffset: core::mem::offset_of!(SpriteInstance, pos_st) as _,
+                            InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
+                            InstanceDataStepRate: 1,
+                        },
+                        D3D11_INPUT_ELEMENT_DESC {
+                            SemanticName: s!("TEXCOORD"),
+                            SemanticIndex: 0,
+                            Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+                            InputSlot: 1,
+                            AlignedByteOffset: core::mem::offset_of!(SpriteInstance, uv_st) as _,
+                            InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
+                            InstanceDataStepRate: 1,
+                        },
+                    ],
+                    &vsh_code,
+                    Some(sprite_instance_input_layout.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let sprite_instance_vsh = unsafe { sprite_instance_vsh.assume_init().unwrap() };
+        let sprite_instance_psh = unsafe { sprite_instance_psh.assume_init().unwrap() };
+        let sprite_instance_input_layout =
+            unsafe { sprite_instance_input_layout.assume_init().unwrap() };
+
+        let mut sprite_instance_base_vb = core::mem::MaybeUninit::uninit();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: core::mem::size_of::<[[f32; 2]; 4]>() as _,
+                        Usage: D3D11_USAGE_IMMUTABLE,
+                        BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as _,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                        StructureByteStride: core::mem::size_of::<[f32; 2]>() as _,
+                    },
+                    Some(&D3D11_SUBRESOURCE_DATA {
+                        pSysMem: [
+                            [0.0f32, 0.0f32],
+                            [1.0f32, 0.0f32],
+                            [0.0f32, 1.0f32],
+                            [1.0f32, 1.0f32],
+                        ]
+                        .as_ptr() as *const _,
+                        SysMemPitch: 0,
+                        SysMemSlicePitch: 0,
+                    }),
+                    Some(sprite_instance_base_vb.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let sprite_instance_base_vb = unsafe { sprite_instance_base_vb.assume_init().unwrap() };
+
+        let sprite_instance_buffer_capacity = Self::SPRITE_INSTANCE_CAPACITY_UNIT;
+        let mut sprite_instance_buffer = core::mem::MaybeUninit::uninit();
+        let mut sprite_instance_buffer_staging = core::mem::MaybeUninit::uninit();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: (core::mem::size_of::<SpriteInstance>()
+                            * sprite_instance_buffer_capacity)
+                            as _,
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as _,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                        StructureByteStride: core::mem::size_of::<SpriteInstance>() as _,
+                    },
+                    None,
+                    Some(sprite_instance_buffer.as_mut_ptr()),
+                )
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: (core::mem::size_of::<SpriteInstance>()
+                            * sprite_instance_buffer_capacity)
+                            as _,
+                        Usage: D3D11_USAGE_STAGING,
+                        BindFlags: 0,
+                        CPUAccessFlags: (D3D11_CPU_ACCESS_WRITE | D3D11_CPU_ACCESS_READ).0 as _,
+                        MiscFlags: 0,
+                        StructureByteStride: core::mem::size_of::<SpriteInstance>() as _,
+                    },
+                    None,
+                    Some(sprite_instance_buffer_staging.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let sprite_instance_buffer = unsafe { sprite_instance_buffer.assume_init().unwrap() };
+        let sprite_instance_buffer_staging =
+            unsafe { sprite_instance_buffer_staging.assume_init().unwrap() };
 
         let mut texture_preview_vb = core::mem::MaybeUninit::uninit();
         unsafe {
@@ -775,18 +965,6 @@ impl AtlasBaseGridView {
         }
         let texture_preview_cb = unsafe { texture_preview_cb.assume_init().unwrap() };
 
-        let mut texture_preview_srv = core::mem::MaybeUninit::uninit();
-        unsafe {
-            init.subsystem
-                .d3d11_device
-                .CreateShaderResourceView(
-                    &simple_atlas.borrow().resource,
-                    None,
-                    Some(texture_preview_srv.as_mut_ptr()),
-                )
-                .unwrap();
-        }
-        let texture_preview_srv = unsafe { texture_preview_srv.assume_init().unwrap() };
         let mut texture_preview_vsh = core::mem::MaybeUninit::uninit();
         let mut texture_preview_psh = core::mem::MaybeUninit::uninit();
         unsafe {
@@ -818,15 +996,25 @@ impl AtlasBaseGridView {
             render_params_cb,
             texture_preview_vb,
             texture_preview_cb,
-            texture_preview_srv,
             texture_preview_vsh,
             texture_preview_psh,
+            sprite_instance_vsh,
+            sprite_instance_psh,
+            sprite_instance_input_layout,
+            sprite_instance_base_vb,
+            sprite_instance_buffer: RefCell::new(sprite_instance_buffer),
+            sprite_instance_buffer_staging: RefCell::new(sprite_instance_buffer_staging),
+            sprite_instance_buffer_capacity: Cell::new(sprite_instance_buffer_capacity),
+            sprite_instance_buffer_dirty: Cell::new(false),
+            sprite_instance_count: Cell::new(0),
+            tex_sampler,
             size_pixels: Cell::new((init_width_pixels, init_height_pixels)),
             resize_order: Cell::new(None),
             offset_pixels: Cell::new((0.0, 0.0)),
             background_worker_enqueue_access: init.background_worker_enqueue_access.downgrade(),
             simple_atlas,
             sprite_source_offset: RefCell::new(HashMap::new()),
+            d3d11_device: init.subsystem.d3d11_device.clone(),
             d3d11_device_context: init.subsystem.d3d11_imm_context.clone(),
             d3d11_mt,
             premul_blend_state,
@@ -866,59 +1054,154 @@ impl AtlasBaseGridView {
             return;
         };
 
-        for x in sprites {
-            if self
+        if self.sprite_instance_buffer_capacity.get() < sprites.len() {
+            // たりない
+            let new_capacity =
+                self.sprite_instance_buffer_capacity.get() + Self::SPRITE_INSTANCE_CAPACITY_UNIT;
+            let mut new_buf = core::mem::MaybeUninit::uninit();
+            unsafe {
+                self.d3d11_device
+                    .CreateBuffer(
+                        &D3D11_BUFFER_DESC {
+                            ByteWidth: (core::mem::size_of::<SpriteInstance>() * new_capacity) as _,
+                            Usage: D3D11_USAGE_DEFAULT,
+                            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as _,
+                            CPUAccessFlags: 0,
+                            MiscFlags: 0,
+                            StructureByteStride: core::mem::size_of::<SpriteInstance>() as _,
+                        },
+                        None,
+                        Some(new_buf.as_mut_ptr()),
+                    )
+                    .unwrap();
+            }
+            self.sprite_instance_buffer
+                .replace(unsafe { new_buf.assume_init().unwrap() });
+            let mut new_buf_stg = MaybeUninit::uninit();
+            unsafe {
+                self.d3d11_device
+                    .CreateBuffer(
+                        &D3D11_BUFFER_DESC {
+                            ByteWidth: (core::mem::size_of::<SpriteInstance>() * new_capacity) as _,
+                            Usage: D3D11_USAGE_STAGING,
+                            BindFlags: 0,
+                            CPUAccessFlags: (D3D11_CPU_ACCESS_WRITE | D3D11_CPU_ACCESS_READ).0 as _,
+                            MiscFlags: 0,
+                            StructureByteStride: core::mem::size_of::<SpriteInstance>() as _,
+                        },
+                        None,
+                        Some(new_buf_stg.as_mut_ptr()),
+                    )
+                    .unwrap();
+                let old_stg = self
+                    .sprite_instance_buffer_staging
+                    .replace(new_buf_stg.assume_init().unwrap());
+                self.d3d11_mt.Enter();
+                self.d3d11_device_context
+                    .CopyResource(&*self.sprite_instance_buffer_staging.borrow(), &old_stg);
+                self.d3d11_device_context.Flush();
+                self.d3d11_mt.Leave();
+            }
+            self.sprite_instance_buffer_capacity.set(new_capacity);
+            self.sprite_instance_buffer_dirty.set(true);
+        }
+
+        unsafe {
+            self.d3d11_mt.Enter();
+        }
+        let mut mapped = MaybeUninit::uninit();
+        unsafe {
+            self.d3d11_device_context
+                .Map(
+                    &*self.sprite_instance_buffer_staging.borrow(),
+                    0,
+                    D3D11_MAP_WRITE,
+                    0,
+                    Some(mapped.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let mapped = unsafe { mapped.assume_init() };
+        for (n, x) in sprites.iter().enumerate() {
+            let (ox, oy) = match self
                 .sprite_source_offset
-                .borrow()
-                .contains_key(&x.source_path)
+                .borrow_mut()
+                .entry(x.source_path.clone())
             {
                 // ロード済み
-                continue;
-            }
+                std::collections::hash_map::Entry::Occupied(o) => *o.get(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let Some((ox, oy)) = self.simple_atlas.borrow_mut().alloc(x.width, x.height)
+                    else {
+                        tracing::warn!("no suitable region(realloc or alloc page here...)");
+                        continue;
+                    };
+                    e.insert((ox, oy));
 
-            let Some((ox, oy)) = self.simple_atlas.borrow_mut().alloc(x.width, x.height) else {
-                tracing::warn!("no suitable region(realloc or alloc page here...)");
-                continue;
+                    background_worker_enqueue_access.enqueue(BackgroundWork::LoadSpriteSource(
+                        x.source_path.clone(),
+                        Box::new({
+                            let d3d11_device_context = self.d3d11_device_context.clone();
+                            let d3d11_mt = self.d3d11_mt.clone();
+                            let simple_atlas_resource = self.simple_atlas.borrow().resource.clone();
+                            let (width, height) = (x.width, x.height);
+
+                            move |path, di| {
+                                // TODO: HDR対応
+                                let img_formatted = di.to_rgba8();
+                                unsafe {
+                                    d3d11_mt.Enter();
+                                    d3d11_device_context.UpdateSubresource(
+                                        &simple_atlas_resource,
+                                        0,
+                                        Some(&D3D11_BOX {
+                                            left: ox,
+                                            top: oy,
+                                            front: 0,
+                                            right: ox + width,
+                                            bottom: oy + height,
+                                            back: 1,
+                                        }),
+                                        img_formatted.as_bytes().as_ptr() as *const _,
+                                        img_formatted.width() * 4,
+                                        0,
+                                    );
+                                    d3d11_mt.Leave();
+                                }
+                                tracing::info!({?path, ox, oy}, "LoadSpriteComplete");
+                            }
+                        }),
+                    ));
+
+                    (ox, oy)
+                }
             };
-            self.sprite_source_offset
-                .borrow_mut()
-                .insert(x.source_path.clone(), (ox, oy));
 
-            background_worker_enqueue_access.enqueue(BackgroundWork::LoadSpriteSource(
-                x.source_path.clone(),
-                Box::new({
-                    let d3d11_device_context = self.d3d11_device_context.clone();
-                    let d3d11_mt = self.d3d11_mt.clone();
-                    let simple_atlas_resource = self.simple_atlas.borrow().resource.clone();
-                    let (width, height) = (x.width, x.height);
+            unsafe {
+                let instance_ptr = (mapped.pData as *mut SpriteInstance).add(n);
+                core::ptr::write(
+                    core::ptr::addr_of_mut!((*instance_ptr).pos_st),
+                    [x.width as f32, x.height as f32, x.left as f32, x.top as f32],
+                );
+                core::ptr::write(
+                    core::ptr::addr_of_mut!((*instance_ptr).uv_st),
+                    [
+                        x.width as f32 / SimpleTextureAtlas::SIZE as f32,
+                        x.height as f32 / SimpleTextureAtlas::SIZE as f32,
+                        ox as f32 / SimpleTextureAtlas::SIZE as f32,
+                        oy as f32 / SimpleTextureAtlas::SIZE as f32,
+                    ],
+                );
 
-                    move |path, di| {
-                        // TODO: HDR対応
-                        let img_formatted = di.to_rgba8();
-                        unsafe {
-                            d3d11_mt.Enter();
-                            d3d11_device_context.UpdateSubresource(
-                                &simple_atlas_resource,
-                                0,
-                                Some(&D3D11_BOX {
-                                    left: ox,
-                                    top: oy,
-                                    front: 0,
-                                    right: ox + width,
-                                    bottom: oy + height,
-                                    back: 1,
-                                }),
-                                img_formatted.as_bytes().as_ptr() as *const _,
-                                img_formatted.width() * 4,
-                                0,
-                            );
-                            d3d11_mt.Leave();
-                        }
-                        tracing::info!({?path, ox, oy}, "LoadSpriteComplete");
-                    }
-                }),
-            ));
+                self.sprite_instance_buffer_dirty.set(true);
+            }
         }
+        unsafe {
+            self.d3d11_device_context
+                .Unmap(&*self.sprite_instance_buffer_staging.borrow(), 0);
+            self.d3d11_mt.Leave();
+        }
+        self.sprite_instance_count.set(sprites.len());
     }
 
     pub fn set_offset(&self, offset_x: f32, offset_y: f32) {
@@ -1001,6 +1284,16 @@ impl AtlasBaseGridView {
                 .d3d11_imm_context
                 .Unmap(&self.texture_preview_cb, 0);
         }
+
+        if self.sprite_instance_buffer_dirty.replace(false) {
+            unsafe {
+                subsystem.d3d11_imm_context.CopyResource(
+                    &*self.sprite_instance_buffer.borrow(),
+                    &*self.sprite_instance_buffer_staging.borrow(),
+                );
+            }
+        }
+
         unsafe {
             self.d3d11_mt.Leave();
         }
@@ -1058,6 +1351,52 @@ impl AtlasBaseGridView {
                 .OMSetBlendState(&self.premul_blend_state, None, u32::MAX);
             subsystem
                 .d3d11_imm_context
+                .VSSetShader(&self.sprite_instance_vsh, None);
+            subsystem
+                .d3d11_imm_context
+                .PSSetShader(&self.sprite_instance_psh, None);
+            subsystem
+                .d3d11_imm_context
+                .VSSetConstantBuffers(0, Some(&[Some(self.texture_preview_cb.clone())]));
+            subsystem
+                .d3d11_imm_context
+                .PSSetShaderResources(0, Some(&[Some(self.simple_atlas.borrow().srv.clone())]));
+            subsystem
+                .d3d11_imm_context
+                .PSSetSamplers(0, Some(&[Some(self.tex_sampler.clone())]));
+            subsystem
+                .d3d11_imm_context
+                .IASetInputLayout(&self.sprite_instance_input_layout);
+            subsystem
+                .d3d11_imm_context
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            subsystem.d3d11_imm_context.IASetVertexBuffers(
+                0,
+                2,
+                Some(
+                    [
+                        Some(self.sprite_instance_base_vb.clone()),
+                        Some(self.sprite_instance_buffer.borrow().clone()),
+                    ]
+                    .as_ptr(),
+                ),
+                Some(
+                    [
+                        core::mem::size_of::<[f32; 2]>() as u32,
+                        core::mem::size_of::<SpriteInstance>() as u32,
+                    ]
+                    .as_ptr(),
+                ),
+                Some([0u32, 0u32].as_ptr()),
+            );
+            subsystem.d3d11_imm_context.DrawInstanced(
+                4,
+                self.sprite_instance_count.get() as _,
+                0,
+                0,
+            );
+            /*subsystem
+                .d3d11_imm_context
                 .VSSetShader(&self.texture_preview_vsh, None);
             subsystem
                 .d3d11_imm_context
@@ -1078,7 +1417,7 @@ impl AtlasBaseGridView {
                 Some(&(core::mem::size_of::<[f32; 2]>() as u32) as *const _),
                 Some(&0u32 as *const _),
             );
-            subsystem.d3d11_imm_context.Draw(4, 0);
+            subsystem.d3d11_imm_context.Draw(4, 0);*/
             subsystem.d3d11_imm_context.PSSetShader(None, None);
             subsystem.d3d11_imm_context.VSSetShader(None, None);
             subsystem.d3d11_imm_context.Flush();
@@ -3042,6 +3381,7 @@ impl AppWindowPresenter {
         let file_dnd_overlay = Rc::new(FileDragAndDropOverlayView::new(&mut init.for_view));
 
         sprite_list_pane.set_top(&mut init.for_view.ht.borrow_mut(), header_view.height());
+        grid_view.set_offset(0.0, -init.for_view.dip_to_pixels(header_view.height()));
 
         root.Children().unwrap().InsertAtBottom(&bg).unwrap();
         grid_view.mount(&root.Children().unwrap());

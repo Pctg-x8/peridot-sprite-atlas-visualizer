@@ -1,14 +1,14 @@
-use std::os::windows::ffi::OsStringExt;
+use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf};
 
 use windows::{
-    core::{w, PCWSTR},
     Win32::{
         Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS},
         System::Registry::{
-            RegCloseKey, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
-            REG_ROUTINE_FLAGS, REG_SAM_FLAGS, RRF_RT_REG_SZ,
+            HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_ROUTINE_FLAGS, REG_SAM_FLAGS, RRF_RT_REG_SZ,
+            RegCloseKey, RegGetValueW, RegOpenKeyExW,
         },
     },
+    core::{PCWSTR, w},
 };
 
 fn main() {
@@ -21,22 +21,52 @@ fn main() {
     let appsdk_root = project_root.join(".nuget/Microsoft.WindowsAppSDK.1.6.250108002");
     let win2d_root = project_root.join(".nuget/Microsoft.Graphics.Win2D.1.3.2");
 
+    // locate win10 sdk
+    let win10_sdk = Windows10SDK::find();
+    let win10_sdk_bin_folder = win10_sdk.bin_folder();
+    let win10_sdk_include_folder = win10_sdk.include_folder();
+
+    // build shaders
+    let fxc_path = win10_sdk_bin_folder.join("fxc.exe");
+    std::process::Command::new(&fxc_path)
+        .args(["/E", "main", "/T", "vs_5_0", "/Fo"])
+        .arg(project_root.join("resources/grid/vsh.fxc"))
+        .arg(project_root.join("resources/grid/vsh.hlsl"))
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+    std::process::Command::new(&fxc_path)
+        .args(["/E", "main", "/T", "ps_5_0", "/Fo"])
+        .arg(project_root.join("resources/grid/psh.fxc"))
+        .arg(project_root.join("resources/grid/psh.hlsl"))
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+    std::process::Command::new(&fxc_path)
+        .args(["/E", "main", "/T", "vs_5_0", "/Fo"])
+        .arg(project_root.join("resources/sprite_instance/vsh.fxc"))
+        .arg(project_root.join("resources/sprite_instance/vsh.hlsl"))
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+    std::process::Command::new(&fxc_path)
+        .args(["/E", "main", "/T", "ps_5_0", "/Fo"])
+        .arg(project_root.join("resources/sprite_instance/psh.fxc"))
+        .arg(project_root.join("resources/sprite_instance/psh.hlsl"))
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap();
+
     // build rc
-    let (win10_sdk_installation_folder, win10_sdk_product_version) = find_win10_sdk();
-    let rc_exe =
-        find_win10_sdk_bin_folder(&win10_sdk_installation_folder, &win10_sdk_product_version)
-            .join("rc.exe");
-    let include_um =
-        find_win10_sdk_include_folder(&win10_sdk_installation_folder, &win10_sdk_product_version)
-            .join("um");
-    let include_shared =
-        find_win10_sdk_include_folder(&win10_sdk_installation_folder, &win10_sdk_product_version)
-            .join("shared");
-    std::process::Command::new(&rc_exe)
+    std::process::Command::new(win10_sdk_bin_folder.join("rc.exe"))
         .arg("/I")
-        .arg(include_um)
+        .arg(win10_sdk_include_folder.join("um"))
         .arg("/I")
-        .arg(include_shared)
+        .arg(win10_sdk_include_folder.join("shared"))
         .args(["/r", "/fo"])
         .arg(out_dir.join("exe.res"))
         .arg(project_root.join("exe.rc"))
@@ -184,53 +214,55 @@ impl RegistryKey {
     }
 }
 
-fn find_win10_sdk() -> (std::path::PathBuf, std::ffi::OsString) {
-    // レジストリの中にあるらしい
-    // https://stackoverflow.com/questions/35119223/how-to-programmatically-detect-and-locate-the-windows-10-sdk
-
-    let key = RegistryKey::open(
-        HKEY_LOCAL_MACHINE,
-        w!("SOFTWARE\\WOW6432Node\\Microsoft\\Microsoft SDKs\\Windows\\v10.0"),
-        None,
-        KEY_READ,
-    )
-    .expect("Failed to open registry");
-
-    let installation_folder = key
-        .string_value(w!("InstallationFolder"), REG_ROUTINE_FLAGS(0))
-        .expect("Failed to get InstallationFolder value");
-    let mut product_version = key
-        .string_value(w!("ProductVersion"), REG_ROUTINE_FLAGS(0))
-        .expect("Failed to get ProductVersion value");
-    product_version.push(".0");
-
-    (
-        std::path::PathBuf::from(installation_folder),
-        product_version,
-    )
+pub struct Windows10SDK {
+    installation_folder: PathBuf,
+    product_version: OsString,
 }
+impl Windows10SDK {
+    pub fn find() -> Self {
+        // レジストリの中にあるらしい
+        // https://stackoverflow.com/questions/35119223/how-to-programmatically-detect-and-locate-the-windows-10-sdk
 
-fn find_win10_sdk_include_folder(
-    installation_folder: &std::path::PathBuf,
-    product_version: &std::ffi::OsString,
-) -> std::path::PathBuf {
-    installation_folder.join("Include").join(product_version)
-}
+        let key = RegistryKey::open(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\WOW6432Node\\Microsoft\\Microsoft SDKs\\Windows\\v10.0"),
+            None,
+            KEY_READ,
+        )
+        .expect("Failed to open registry");
 
-fn find_win10_sdk_bin_folder(
-    installation_folder: &std::path::PathBuf,
-    product_version: &std::ffi::OsString,
-) -> std::path::PathBuf {
-    let bits_str = if cfg!(target_arch = "x86_64") {
-        "x64"
-    } else if cfg!(target_arch = "x86") {
-        "x86"
-    } else {
-        unimplemented!();
-    };
+        let installation_folder = key
+            .string_value(w!("InstallationFolder"), REG_ROUTINE_FLAGS(0))
+            .expect("Failed to get InstallationFolder value");
+        let mut product_version = key
+            .string_value(w!("ProductVersion"), REG_ROUTINE_FLAGS(0))
+            .expect("Failed to get ProductVersion value");
+        product_version.push(".0");
 
-    installation_folder
-        .join("bin")
-        .join(product_version)
-        .join(bits_str)
+        Self {
+            installation_folder: PathBuf::from(installation_folder),
+            product_version,
+        }
+    }
+
+    pub fn include_folder(&self) -> PathBuf {
+        self.installation_folder
+            .join("Include")
+            .join(&self.product_version)
+    }
+
+    pub fn bin_folder(&self) -> PathBuf {
+        let bits_str = if cfg!(target_arch = "x86_64") {
+            "x64"
+        } else if cfg!(target_arch = "x86") {
+            "x86"
+        } else {
+            unimplemented!();
+        };
+
+        self.installation_folder
+            .join("bin")
+            .join(&self.product_version)
+            .join(bits_str)
+    }
 }
