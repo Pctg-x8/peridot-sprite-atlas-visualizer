@@ -13,6 +13,7 @@ use std::{
     thread::JoinHandle,
 };
 
+use app_state::{AppState, SpriteInfo};
 use component::app_header::AppHeaderView;
 use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
@@ -29,7 +30,6 @@ use subsystem::Subsystem;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
-    System::{DispatcherQueue, DispatcherQueueController, DispatcherQueueHandler},
     UI::{
         Color,
         Composition::{
@@ -75,8 +75,7 @@ use windows::{
             Dxgi::{
                 Common::{
                     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM,
-                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R32G32_FLOAT,
-                    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
+                    DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
                 },
                 DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -126,6 +125,7 @@ use windows::{
 use windows_core::{BOOL, HSTRING, implement};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
+mod app_state;
 mod component;
 mod composition_element_builder;
 mod effect_builder;
@@ -3223,91 +3223,86 @@ impl SpriteListPanePresenter {
             view.ht_root,
         );
 
-        init.app_state
-            .borrow_mut()
-            .sprites_update_callbacks
-            .push(Box::new({
-                let subsystem = Rc::downgrade(init.for_view.subsystem);
-                let ht = Rc::downgrade(init.for_view.ht);
-                let view = Rc::downgrade(&view);
-                let sprite_list_cells = Rc::downgrade(&sprite_list_cells);
-                let background_worker_enqueue_access =
-                    init.for_view.background_worker_enqueue_access.downgrade();
-                let background_worker_view_update_callback =
-                    Rc::downgrade(init.for_view.background_worker_view_update_callback);
+        init.app_state.borrow_mut().register_sprites_view_feedback({
+            let subsystem = Rc::downgrade(init.for_view.subsystem);
+            let ht = Rc::downgrade(init.for_view.ht);
+            let view = Rc::downgrade(&view);
+            let sprite_list_cells = Rc::downgrade(&sprite_list_cells);
+            let background_worker_enqueue_access =
+                init.for_view.background_worker_enqueue_access.downgrade();
+            let background_worker_view_update_callback =
+                Rc::downgrade(init.for_view.background_worker_view_update_callback);
 
-                move |sprites| {
-                    let Some(subsystem) = subsystem.upgrade() else {
-                        // app teardown-ed
-                        return;
-                    };
-                    let Some(background_worker_enqueue_access) =
-                        background_worker_enqueue_access.upgrade()
-                    else {
-                        // app teardown-ed
-                        return;
-                    };
-                    let Some(background_worker_view_update_callback) =
-                        background_worker_view_update_callback.upgrade()
-                    else {
-                        // app teardown-ed
-                        return;
-                    };
-                    let Some(ht) = ht.upgrade() else {
-                        // parent teardown-ed
-                        return;
-                    };
-                    let Some(view) = view.upgrade() else {
-                        // parent teardown-ed
-                        return;
-                    };
-                    let Some(sprite_list_cells) = sprite_list_cells.upgrade() else {
-                        // parent teardown-ed
-                        return;
-                    };
+            move |sprites| {
+                let Some(subsystem) = subsystem.upgrade() else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(background_worker_enqueue_access) =
+                    background_worker_enqueue_access.upgrade()
+                else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(background_worker_view_update_callback) =
+                    background_worker_view_update_callback.upgrade()
+                else {
+                    // app teardown-ed
+                    return;
+                };
+                let Some(ht) = ht.upgrade() else {
+                    // parent teardown-ed
+                    return;
+                };
+                let Some(view) = view.upgrade() else {
+                    // parent teardown-ed
+                    return;
+                };
+                let Some(sprite_list_cells) = sprite_list_cells.upgrade() else {
+                    // parent teardown-ed
+                    return;
+                };
 
-                    sprite_list_contents.clear();
-                    sprite_list_contents
-                        .extend(sprites.iter().map(|x| (x.name.clone(), x.selected)));
-                    let visible_contents = &sprite_list_contents[..];
-                    for (n, &(ref c, sel)) in visible_contents.iter().enumerate() {
-                        if sprite_list_cells.borrow().len() == n {
-                            // create new one
-                            let new_cell = SpriteListCellView::new(
-                                &mut ViewInitContext {
-                                    subsystem: &subsystem,
-                                    ht: &ht,
-                                    dpi: view.dpi,
-                                    background_worker_enqueue_access:
-                                        &background_worker_enqueue_access,
-                                    background_worker_view_update_callback:
-                                        &background_worker_view_update_callback,
-                                },
-                                &c,
-                                SpriteListPaneView::CELL_AREA_PADDINGS.top
-                                    + n as f32 * SpriteListCellView::CELL_HEIGHT,
-                            );
-                            new_cell.mount(&view.root.Children().unwrap());
-                            if sel {
-                                new_cell.on_select();
-                            }
-                            sprite_list_cells.borrow_mut().push(new_cell);
-                            continue;
-                        }
-
-                        sprite_list_cells.borrow()[n].set_name(&c, &subsystem);
-                        sprite_list_cells.borrow()[n].set_top(
+                sprite_list_contents.clear();
+                sprite_list_contents.extend(sprites.iter().map(|x| (x.name.clone(), x.selected)));
+                let visible_contents = &sprite_list_contents[..];
+                for (n, &(ref c, sel)) in visible_contents.iter().enumerate() {
+                    if sprite_list_cells.borrow().len() == n {
+                        // create new one
+                        let new_cell = SpriteListCellView::new(
+                            &mut ViewInitContext {
+                                subsystem: &subsystem,
+                                ht: &ht,
+                                dpi: view.dpi,
+                                background_worker_enqueue_access: &background_worker_enqueue_access,
+                                background_worker_view_update_callback:
+                                    &background_worker_view_update_callback,
+                            },
+                            &c,
                             SpriteListPaneView::CELL_AREA_PADDINGS.top
                                 + n as f32 * SpriteListCellView::CELL_HEIGHT,
                         );
+                        new_cell.mount(&view.root.Children().unwrap());
                         if sel {
-                            sprite_list_cells.borrow()[n].on_select();
-                        } else {
-                            sprite_list_cells.borrow()[n].on_deselect();
+                            new_cell.on_select();
                         }
+                        sprite_list_cells.borrow_mut().push(new_cell);
+                        continue;
+                    }
+
+                    sprite_list_cells.borrow()[n].set_name(&c, &subsystem);
+                    sprite_list_cells.borrow()[n].set_top(
+                        SpriteListPaneView::CELL_AREA_PADDINGS.top
+                            + n as f32 * SpriteListCellView::CELL_HEIGHT,
+                    );
+                    if sel {
+                        sprite_list_cells.borrow()[n].on_select();
+                    } else {
+                        sprite_list_cells.borrow()[n].on_deselect();
                     }
                 }
-            }));
+            }
+        });
 
         let ht_action_handler = Rc::new(SpriteListPaneHitActionHandler {
             view: view.clone(),
@@ -3780,42 +3775,39 @@ impl AppWindowPresenter {
         });
         init.dpi_handlers.push(Rc::downgrade(&dpi_handler) as _);
 
-        init.app_state
-            .borrow_mut()
-            .sprites_update_callbacks
-            .push(Box::new({
-                let grid_view = Rc::downgrade(&grid_view);
-                let selected_sprite_marker_view = Rc::downgrade(&selected_sprite_marker_view);
-                let mut last_selected_index = None;
+        init.app_state.borrow_mut().register_sprites_view_feedback({
+            let grid_view = Rc::downgrade(&grid_view);
+            let selected_sprite_marker_view = Rc::downgrade(&selected_sprite_marker_view);
+            let mut last_selected_index = None;
 
-                move |sprites| {
-                    let Some(grid_view) = grid_view.upgrade() else {
-                        // parent teardown-ed
-                        return;
-                    };
-                    let Some(selected_sprite_marker_view) = selected_sprite_marker_view.upgrade()
-                    else {
-                        // parent teardown-ed
-                        return;
-                    };
+            move |sprites| {
+                let Some(grid_view) = grid_view.upgrade() else {
+                    // parent teardown-ed
+                    return;
+                };
+                let Some(selected_sprite_marker_view) = selected_sprite_marker_view.upgrade()
+                else {
+                    // parent teardown-ed
+                    return;
+                };
 
-                    grid_view.update_sprites(sprites);
+                grid_view.update_sprites(sprites);
 
-                    // TODO: Model的には複数選択できる形にしてるけどViewはどうしようか......
-                    let selected_index = sprites.iter().position(|x| x.selected);
-                    if selected_index != last_selected_index {
-                        last_selected_index = selected_index;
-                        if let Some(x) = selected_index {
-                            selected_sprite_marker_view.focus(
-                                sprites[x].left as _,
-                                sprites[x].top as _,
-                                sprites[x].width as _,
-                                sprites[x].height as _,
-                            );
-                        }
+                // TODO: Model的には複数選択できる形にしてるけどViewはどうしようか......
+                let selected_index = sprites.iter().position(|x| x.selected);
+                if selected_index != last_selected_index {
+                    last_selected_index = selected_index;
+                    if let Some(x) = selected_index {
+                        selected_sprite_marker_view.focus(
+                            sprites[x].left as _,
+                            sprites[x].top as _,
+                            sprites[x].width as _,
+                            sprites[x].height as _,
+                        );
                     }
                 }
-            }));
+            }
+        });
 
         Self {
             root,
@@ -4226,47 +4218,6 @@ impl LockedGlobal {
     }
 }
 
-#[derive(Debug)]
-pub struct SpriteInfo {
-    pub name: String,
-    pub source_path: PathBuf,
-    pub width: u32,
-    pub height: u32,
-    pub left: u32,
-    pub top: u32,
-    pub left_slice: u32,
-    pub right_slice: u32,
-    pub top_slice: u32,
-    pub bottom_slice: u32,
-    pub selected: bool,
-}
-
-pub struct AppState {
-    pub atlas_width: u32,
-    pub atlas_height: u32,
-    pub sprites: Vec<SpriteInfo>,
-    pub sprites_update_callbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
-}
-impl AppState {
-    pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {
-        self.sprites.extend(sprites);
-
-        for cb in self.sprites_update_callbacks.iter_mut() {
-            cb(&self.sprites);
-        }
-    }
-
-    pub fn select_sprite(&mut self, index: usize) {
-        for (n, x) in self.sprites.iter_mut().enumerate() {
-            x.selected = n == index;
-        }
-
-        for cb in self.sprites_update_callbacks.iter_mut() {
-            cb(&self.sprites);
-        }
-    }
-}
-
 fn main() {
     tracing_subscriber::fmt().pretty().init();
     unsafe {
@@ -4348,7 +4299,7 @@ fn main() {
         atlas_width: 32,
         atlas_height: 32,
         sprites: Vec::new(),
-        sprites_update_callbacks: Vec::new(),
+        sprites_view_feedbacks: Vec::new(),
     }));
 
     let mut app_window_state_model = AppWindowStateModel::new(
