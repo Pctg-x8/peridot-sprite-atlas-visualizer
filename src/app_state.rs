@@ -18,10 +18,19 @@ pub struct SpriteInfo {
 pub struct AppState {
     pub atlas_width: u32,
     pub atlas_height: u32,
-    pub sprites: Vec<SpriteInfo>,
-    pub sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
+    sprites: Vec<SpriteInfo>,
+    sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
 }
 impl AppState {
+    pub fn new() -> Self {
+        Self {
+            atlas_width: 32,
+            atlas_height: 32,
+            sprites: Vec::new(),
+            sprites_view_feedbacks: Vec::new(),
+        }
+    }
+
     pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {
         self.sprites.extend(sprites);
 

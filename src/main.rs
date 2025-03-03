@@ -138,6 +138,8 @@ mod subsystem;
 use crate::hittest::*;
 use crate::input::*;
 
+type AppHitTestTreeManager = HitTestTreeManager<AppState>;
+
 #[macro_export]
 macro_rules! scoped_try {
     ($label: tt, $x: expr) => {
@@ -299,7 +301,7 @@ pub struct PresenterInitContext<'r> {
 }
 pub struct ViewInitContext<'r> {
     pub subsystem: &'r Rc<Subsystem>,
-    pub ht: &'r Rc<RefCell<HitTestTreeContext>>,
+    pub ht: &'r Rc<RefCell<AppHitTestTreeManager>>,
     pub dpi: f32,
     pub background_worker_enqueue_access: &'r BackgroundWorkerEnqueueAccess,
     pub background_worker_view_update_callback:
@@ -1974,7 +1976,7 @@ impl SpriteListToggleButtonView {
     pub fn mount(
         &self,
         children: &VisualCollection,
-        ht: &mut HitTestTreeContext,
+        ht: &mut AppHitTestTreeManager,
         ht_parent: HitTestTreeRef,
     ) {
         children.InsertAtTop(&self.root).unwrap();
@@ -2016,7 +2018,7 @@ impl SpriteListToggleButtonView {
         self.update_bg_opacity();
     }
 
-    pub fn transit_hidden(&self, ht: &mut HitTestTreeContext) {
+    pub fn transit_hidden(&self, ht: &mut AppHitTestTreeManager) {
         let dpi = self.dpi.get();
 
         self.icon
@@ -2036,7 +2038,7 @@ impl SpriteListToggleButtonView {
         ht.get_mut(self.ht_root).left = 8.0 + SpriteListPaneView::SPACING;
     }
 
-    pub fn transit_shown(&self, ht: &mut HitTestTreeContext) {
+    pub fn transit_shown(&self, ht: &mut AppHitTestTreeManager) {
         let dpi = self.dpi.get();
 
         self.icon
@@ -2872,14 +2874,14 @@ impl SpriteListPaneView {
     pub fn mount(
         &self,
         children: &VisualCollection,
-        ht: &mut HitTestTreeContext,
+        ht: &mut AppHitTestTreeManager,
         ht_parent: HitTestTreeRef,
     ) {
         children.InsertAtTop(&self.root).unwrap();
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn unmount(&self, ht: &mut HitTestTreeContext) {
+    pub fn unmount(&self, ht: &mut AppHitTestTreeManager) {
         self.root
             .Parent()
             .unwrap()
@@ -2890,11 +2892,11 @@ impl SpriteListPaneView {
         ht.remove_child(self.ht_root);
     }
 
-    pub fn shutdown(&self, ht: &mut HitTestTreeContext) {
+    pub fn shutdown(&self, ht: &mut AppHitTestTreeManager) {
         ht.free_rec(self.ht_root);
     }
 
-    pub fn set_top(&self, ht: &mut HitTestTreeContext, top: f32) {
+    pub fn set_top(&self, ht: &mut AppHitTestTreeManager, top: f32) {
         self.composition_properties
             .InsertScalar(h!("TopOffset"), top)
             .unwrap();
@@ -2910,7 +2912,7 @@ impl SpriteListPaneView {
         self.top.set(top);
     }
 
-    pub fn set_width(&self, ht: &mut HitTestTreeContext, width: f32) {
+    pub fn set_width(&self, ht: &mut AppHitTestTreeManager, width: f32) {
         self.root
             .SetSize(Vector2 {
                 X: dip_to_pixels(width, self.dpi),
@@ -2922,14 +2924,14 @@ impl SpriteListPaneView {
         self.width.set(width);
     }
 
-    pub fn transit_hidden(&self, ht: &mut HitTestTreeContext) {
+    pub fn transit_hidden(&self, ht: &mut AppHitTestTreeManager) {
         self.composition_properties
             .StartAnimation(h!("ShownRate"), &self.hide_animation)
             .unwrap();
         ht.get_mut(self.ht_root).left = -self.width.get();
     }
 
-    pub fn transit_shown(&self, ht: &mut HitTestTreeContext) {
+    pub fn transit_shown(&self, ht: &mut AppHitTestTreeManager) {
         self.composition_properties
             .StartAnimation(h!("ShownRate"), &self.show_animation)
             .unwrap();
@@ -2944,10 +2946,11 @@ pub struct SpriteListPaneHitActionHandler {
     pub active_cell_index: Cell<Option<usize>>,
     pub hidden: Cell<bool>,
     adjust_drag_state: Cell<Option<(f32, f32)>>,
-    app_state: std::rc::Weak<RefCell<AppState>>,
 }
 impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
-    fn cursor(&self, sender: HitTestTreeRef) -> Option<HCURSOR> {
+    type Context = AppState;
+
+    fn cursor(&self, sender: HitTestTreeRef, _context: &mut AppState) -> Option<HCURSOR> {
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             // TODO: 必要そうならキャッシュする
             return Some(unsafe { LoadCursorW(None, IDC_SIZEWE).unwrap() });
@@ -2959,7 +2962,8 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -3002,7 +3006,8 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        _ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
         _client_x: f32,
         _client_y: f32,
         _client_width: f32,
@@ -3032,7 +3037,8 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        _ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
         client_x: f32,
         _client_y: f32,
     ) -> EventContinueControl {
@@ -3059,7 +3065,8 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -3115,7 +3122,8 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        ht: &mut AppHitTestTreeManager,
         client_x: f32,
         _client_y: f32,
     ) -> EventContinueControl {
@@ -3145,7 +3153,8 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut AppState,
+        ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -3172,11 +3181,6 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         }
 
         if sender == self.view.ht_cell_area {
-            let Some(app_state) = self.app_state.upgrade() else {
-                // app teardown-ed
-                return EventContinueControl::empty();
-            };
-
             let (_, local_y, _, _) = ht.translate_client_to_tree_local(
                 sender,
                 client_x,
@@ -3194,7 +3198,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
                 };
 
             if let Some(x) = click_index {
-                app_state.borrow_mut().select_sprite(x);
+                context.select_sprite(x);
             }
 
             return EventContinueControl::STOP_PROPAGATION;
@@ -3311,7 +3315,6 @@ impl SpriteListPanePresenter {
             active_cell_index: Cell::new(None),
             hidden: Cell::new(false),
             adjust_drag_state: Cell::new(None),
-            app_state: Rc::downgrade(init.app_state),
         });
         init.for_view
             .ht
@@ -3343,21 +3346,21 @@ impl SpriteListPanePresenter {
     pub fn mount(
         &self,
         children: &VisualCollection,
-        ht: &mut HitTestTreeContext,
+        ht: &mut AppHitTestTreeManager,
         ht_parent: HitTestTreeRef,
     ) {
         self.view.mount(children, ht, ht_parent);
     }
 
-    pub fn unmount(&self, ht: &mut HitTestTreeContext) {
+    pub fn unmount(&self, ht: &mut AppHitTestTreeManager) {
         self.view.unmount(ht);
     }
 
-    pub fn shutdown(&self, ht: &mut HitTestTreeContext) {
+    pub fn shutdown(&self, ht: &mut AppHitTestTreeManager) {
         self.view.shutdown(ht);
     }
 
-    pub fn set_top(&self, ht: &mut HitTestTreeContext, top: f32) {
+    pub fn set_top(&self, ht: &mut AppHitTestTreeManager, top: f32) {
         self.view.set_top(ht, top);
     }
 }
@@ -3597,10 +3600,13 @@ struct AppWindowHitTestTreeActionHandler {
     ht_root: HitTestTreeRef,
 }
 impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
+    type Context = AppState;
+
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        _ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
@@ -3623,7 +3629,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        _ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
         _client_width: f32,
@@ -3650,7 +3657,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _ht: &mut HitTestTreeContext,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
@@ -3824,13 +3832,14 @@ impl AppWindowPresenter {
 }
 
 struct AppWindowStateModel {
-    ht: Rc<RefCell<HitTestTreeContext>>,
+    ht: Rc<RefCell<AppHitTestTreeManager>>,
     client_size_pixels: SizePixels,
     dpi: f32,
     dpi_handlers: Vec<std::rc::Weak<dyn DpiHandler>>,
     pointer_input_manager: PointerInputManager,
     composition_target: DesktopWindowTarget,
     root_presenter: AppWindowPresenter,
+    app_state: Rc<RefCell<AppState>>,
 }
 impl AppWindowStateModel {
     pub fn new(
@@ -3842,7 +3851,7 @@ impl AppWindowStateModel {
             RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>,
         >,
     ) -> Self {
-        let ht = Rc::new(RefCell::new(HitTestTreeContext::new()));
+        let ht = Rc::new(RefCell::new(HitTestTreeManager::new()));
         let mut client_size_pixels = core::mem::MaybeUninit::uninit();
         unsafe {
             GetClientRect(bound_hwnd, client_size_pixels.as_mut_ptr()).unwrap();
@@ -3895,6 +3904,7 @@ impl AppWindowStateModel {
             pointer_input_manager,
             composition_target,
             root_presenter,
+            app_state: app_state.clone(),
         }
     }
 
@@ -3970,6 +3980,7 @@ impl AppWindowStateModel {
     pub fn on_mouse_move(&mut self, x_pixels: i16, y_pixels: i16) {
         self.pointer_input_manager.on_mouse_move(
             &mut self.ht.borrow_mut(),
+            &mut self.app_state.borrow_mut(),
             self.root_presenter.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
@@ -3977,7 +3988,10 @@ impl AppWindowStateModel {
         );
 
         // WM_SETCURSORが飛ばないことがあるのでここで設定する
-        if let Some(c) = self.pointer_input_manager.cursor(&self.ht.borrow()) {
+        if let Some(c) = self
+            .pointer_input_manager
+            .cursor(&self.ht.borrow(), &mut self.app_state.borrow_mut())
+        {
             unsafe {
                 SetCursor(Some(c));
             }
@@ -3988,6 +4002,7 @@ impl AppWindowStateModel {
         self.pointer_input_manager.on_mouse_left_down(
             hwnd,
             &mut self.ht.borrow_mut(),
+            &mut self.app_state.borrow_mut(),
             self.root_presenter.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
@@ -3999,6 +4014,7 @@ impl AppWindowStateModel {
         self.pointer_input_manager.on_mouse_left_up(
             hwnd,
             &mut self.ht.borrow_mut(),
+            &mut self.app_state.borrow_mut(),
             self.root_presenter.ht_root,
             self.client_size_pixels.to_dip(self.dpi),
             signed_pixels_to_dip(x_pixels as _, self.dpi),
@@ -4007,7 +4023,10 @@ impl AppWindowStateModel {
     }
 
     pub fn handle_set_cursor(&mut self) -> bool {
-        if let Some(c) = self.pointer_input_manager.cursor(&self.ht.borrow()) {
+        if let Some(c) = self
+            .pointer_input_manager
+            .cursor(&self.ht.borrow(), &mut self.app_state.borrow_mut())
+        {
             unsafe {
                 SetCursor(Some(c));
             }
@@ -4295,12 +4314,7 @@ fn main() {
     bg_worker_vf.resize_with(background_worker.join_handles.len(), || None);
     let bg_worker_vf_update_callback: Rc<RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>> =
         Rc::new(RefCell::new(Vec::new()));
-    let app_state = Rc::new(RefCell::new(AppState {
-        atlas_width: 32,
-        atlas_height: 32,
-        sprites: Vec::new(),
-        sprites_view_feedbacks: Vec::new(),
-    }));
+    let app_state = Rc::new(RefCell::new(AppState::new()));
 
     let mut app_window_state_model = AppWindowStateModel::new(
         &subsystem,

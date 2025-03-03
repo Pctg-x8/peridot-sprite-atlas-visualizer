@@ -11,7 +11,7 @@ use windows::{
 };
 use windows_numerics::Vector2;
 
-use crate::hittest::{HitTestTreeContext, HitTestTreeRef};
+use crate::hittest::{HitTestTreeManager, HitTestTreeRef};
 
 const CLICK_DETECTION_MAX_DISTNACE: f32 = 4.0;
 
@@ -45,9 +45,10 @@ impl PointerInputManager {
         }
     }
 
-    pub fn on_mouse_move(
+    pub fn on_mouse_move<ActionContext>(
         &mut self,
-        ht: &mut HitTestTreeContext,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        action_context: &mut ActionContext,
         ht_root: HitTestTreeRef,
         client_size: Size,
         client_x: f32,
@@ -74,6 +75,7 @@ impl PointerInputManager {
                 .map_or(EventContinueControl::empty(), |a| {
                     a.on_pointer_move(
                         tr,
+                        action_context,
                         ht,
                         client_x,
                         client_y,
@@ -105,6 +107,7 @@ impl PointerInputManager {
                     let cont = action_handler.map_or(EventContinueControl::empty(), |a| {
                         a.on_pointer_leave(
                             tr,
+                            action_context,
                             ht,
                             client_x,
                             client_y,
@@ -128,6 +131,7 @@ impl PointerInputManager {
                         let cont = action_handler.map_or(EventContinueControl::empty(), |a| {
                             a.on_pointer_enter(
                                 tr,
+                                action_context,
                                 ht,
                                 client_x,
                                 client_y,
@@ -158,6 +162,7 @@ impl PointerInputManager {
             let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
                 a.on_pointer_move(
                     tr,
+                    action_context,
                     ht,
                     client_x,
                     client_y,
@@ -166,7 +171,7 @@ impl PointerInputManager {
                 )
             });
             if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                self.on_mouse_move(ht, action_context, ht_root, client_size, client_x, client_y);
             }
             if flags.contains(EventContinueControl::STOP_PROPAGATION) {
                 break;
@@ -176,10 +181,11 @@ impl PointerInputManager {
         }
     }
 
-    pub fn on_mouse_left_down(
+    pub fn on_mouse_left_down<ActionContext>(
         &mut self,
         hwnd: HWND,
-        ht: &mut HitTestTreeContext,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        action_context: &mut ActionContext,
         ht_root: HitTestTreeRef,
         client_size: Size,
         client_x: f32,
@@ -196,17 +202,31 @@ impl PointerInputManager {
                     .get(tr)
                     .action_handler()
                     .map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_down(tr, ht, client_x, client_y)
+                        a.on_pointer_down(tr, action_context, ht, client_x, client_y)
                     });
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                    self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                    self.on_mouse_move(
+                        ht,
+                        action_context,
+                        ht_root,
+                        client_size,
+                        client_x,
+                        client_y,
+                    );
                 }
                 if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
                     unsafe {
                         ReleaseCapture().expect("Failed to release captured pointer");
                     }
                     self.pointer_focus = PointerFocusState::Entering(tr);
-                    self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                    self.on_mouse_move(
+                        ht,
+                        action_context,
+                        ht_root,
+                        client_size,
+                        client_x,
+                        client_y,
+                    );
                 }
             }
             PointerFocusState::Entering(tr) => {
@@ -217,10 +237,17 @@ impl PointerInputManager {
                     let next = t.parent;
                     let action_handler = t.action_handler();
                     let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_down(tr, ht, client_x, client_y)
+                        a.on_pointer_down(tr, action_context, ht, client_x, client_y)
                     });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                        self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                        self.on_mouse_move(
+                            ht,
+                            action_context,
+                            ht_root,
+                            client_size,
+                            client_x,
+                            client_y,
+                        );
                     }
                     if flags.contains(EventContinueControl::CAPTURE_ELEMENT) {
                         self.pointer_focus = PointerFocusState::Capturing(tr);
@@ -239,16 +266,17 @@ impl PointerInputManager {
         }
     }
 
-    pub fn on_mouse_left_up(
+    pub fn on_mouse_left_up<ActionContext>(
         &mut self,
         hwnd: HWND,
-        ht: &mut HitTestTreeContext,
+        ht: &mut HitTestTreeManager<ActionContext>,
+        action_context: &mut ActionContext,
         ht_root: HitTestTreeRef,
         client_size: Size,
         client_x: f32,
         client_y: f32,
     ) {
-        self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+        self.on_mouse_move(ht, action_context, ht_root, client_size, client_x, client_y);
 
         match self.pointer_focus {
             PointerFocusState::Capturing(tr) => {
@@ -256,17 +284,31 @@ impl PointerInputManager {
                     .get(tr)
                     .action_handler()
                     .map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_up(tr, ht, client_x, client_y)
+                        a.on_pointer_up(tr, action_context, ht, client_x, client_y)
                     });
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                    self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                    self.on_mouse_move(
+                        ht,
+                        action_context,
+                        ht_root,
+                        client_size,
+                        client_x,
+                        client_y,
+                    );
                 }
                 if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
                     unsafe {
                         ReleaseCapture().expect("Failed to release captured pointer");
                     }
                     self.pointer_focus = PointerFocusState::Entering(tr);
-                    self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                    self.on_mouse_move(
+                        ht,
+                        action_context,
+                        ht_root,
+                        client_size,
+                        client_x,
+                        client_y,
+                    );
                 }
             }
             PointerFocusState::Entering(tr) => {
@@ -277,10 +319,17 @@ impl PointerInputManager {
                     let next = t.parent;
                     let action_handler = t.action_handler();
                     let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_up(tr, ht, client_x, client_y)
+                        a.on_pointer_up(tr, action_context, ht, client_x, client_y)
                     });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                        self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                        self.on_mouse_move(
+                            ht,
+                            action_context,
+                            ht_root,
+                            client_size,
+                            client_x,
+                            client_y,
+                        );
                     }
                     if flags.contains(EventContinueControl::CAPTURE_ELEMENT) {
                         self.pointer_focus = PointerFocusState::Capturing(tr);
@@ -307,6 +356,7 @@ impl PointerInputManager {
                             .map_or(EventContinueControl::empty(), |a| {
                                 a.on_click(
                                     tr,
+                                    action_context,
                                     ht,
                                     client_x,
                                     client_y,
@@ -315,14 +365,28 @@ impl PointerInputManager {
                                 )
                             });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                        self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                        self.on_mouse_move(
+                            ht,
+                            action_context,
+                            ht_root,
+                            client_size,
+                            client_x,
+                            client_y,
+                        );
                     }
                     if flags.contains(EventContinueControl::RELEASE_CAPTURE_ELEMENT) {
                         unsafe {
                             ReleaseCapture().expect("Failed to release captured pointer");
                         }
                         self.pointer_focus = PointerFocusState::Entering(tr);
-                        self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                        self.on_mouse_move(
+                            ht,
+                            action_context,
+                            ht_root,
+                            client_size,
+                            client_x,
+                            client_y,
+                        );
                     }
                 }
                 PointerFocusState::Entering(tr) => {
@@ -335,6 +399,7 @@ impl PointerInputManager {
                         let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
                             a.on_click(
                                 tr,
+                                action_context,
                                 ht,
                                 client_x,
                                 client_y,
@@ -343,7 +408,14 @@ impl PointerInputManager {
                             )
                         });
                         if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                            self.on_mouse_move(ht, ht_root, client_size, client_x, client_y);
+                            self.on_mouse_move(
+                                ht,
+                                action_context,
+                                ht_root,
+                                client_size,
+                                client_x,
+                                client_y,
+                            );
                         }
                         if flags.contains(EventContinueControl::CAPTURE_ELEMENT) {
                             self.pointer_focus = PointerFocusState::Capturing(tr);
@@ -363,17 +435,25 @@ impl PointerInputManager {
         }
     }
 
-    pub fn cursor(&self, ht: &HitTestTreeContext) -> Option<HCURSOR> {
+    pub fn cursor<ActionContext>(
+        &self,
+        ht: &HitTestTreeManager<ActionContext>,
+        action_context: &mut ActionContext,
+    ) -> Option<HCURSOR> {
         match self.pointer_focus {
-            PointerFocusState::Capturing(tr) => {
-                ht.get(tr).action_handler().and_then(|a| a.cursor(tr))
-            }
+            PointerFocusState::Capturing(tr) => ht
+                .get(tr)
+                .action_handler()
+                .and_then(|a| a.cursor(tr, action_context)),
             PointerFocusState::Entering(tr) => {
                 // bubbling
                 let mut p = Some(tr);
                 while let Some(tr) = p {
                     let t = ht.get(tr);
-                    if let Some(c) = t.action_handler().and_then(|a| a.cursor(tr)) {
+                    if let Some(c) = t
+                        .action_handler()
+                        .and_then(|a| a.cursor(tr, action_context))
+                    {
                         return Some(c);
                     }
 

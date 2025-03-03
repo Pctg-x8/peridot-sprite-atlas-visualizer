@@ -1,12 +1,14 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, rc::Rc};
 
 use windows::Win32::UI::WindowsAndMessaging::HCURSOR;
 
 use crate::input::EventContinueControl;
 
 pub trait HitTestTreeActionHandler {
+    type Context;
+
     #[allow(unused_variables)]
-    fn cursor(&self, sender: HitTestTreeRef) -> Option<HCURSOR> {
+    fn cursor(&self, sender: HitTestTreeRef, context: &mut Self::Context) -> Option<HCURSOR> {
         None
     }
 
@@ -14,7 +16,8 @@ pub trait HitTestTreeActionHandler {
     fn on_pointer_enter(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -27,7 +30,8 @@ pub trait HitTestTreeActionHandler {
     fn on_pointer_leave(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -40,7 +44,8 @@ pub trait HitTestTreeActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
@@ -51,7 +56,8 @@ pub trait HitTestTreeActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
@@ -62,7 +68,8 @@ pub trait HitTestTreeActionHandler {
     fn on_pointer_move(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -75,7 +82,8 @@ pub trait HitTestTreeActionHandler {
     fn on_click(
         &self,
         sender: HitTestTreeRef,
-        ht: &mut HitTestTreeContext,
+        context: &mut Self::Context,
+        ht: &mut HitTestTreeManager<Self::Context>,
         client_x: f32,
         client_y: f32,
         client_width: f32,
@@ -85,7 +93,7 @@ pub trait HitTestTreeActionHandler {
     }
 }
 
-pub struct HitTestTreeData {
+pub struct HitTestTreeData<ActionContext> {
     pub left: f32,
     pub top: f32,
     pub left_adjustment_factor: f32,
@@ -96,11 +104,14 @@ pub struct HitTestTreeData {
     pub height_adjustment_factor: f32,
     pub parent: Option<HitTestTreeRef>,
     pub children: Vec<HitTestTreeRef>,
-    pub action_handler: Option<std::rc::Weak<dyn HitTestTreeActionHandler>>,
+    pub action_handler:
+        Option<std::rc::Weak<dyn HitTestTreeActionHandler<Context = ActionContext>>>,
 }
-impl HitTestTreeData {
+impl<ActionContext> HitTestTreeData<ActionContext> {
     #[inline]
-    pub fn action_handler(&self) -> Option<std::rc::Rc<dyn HitTestTreeActionHandler>> {
+    pub fn action_handler(
+        &self,
+    ) -> Option<Rc<dyn HitTestTreeActionHandler<Context = ActionContext>>> {
         self.action_handler
             .as_ref()
             .and_then(std::rc::Weak::upgrade)
@@ -111,11 +122,11 @@ impl HitTestTreeData {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HitTestTreeRef(usize);
 
-pub struct HitTestTreeContext {
-    pub entities: Vec<HitTestTreeData>,
+pub struct HitTestTreeManager<ActionContext> {
+    pub entities: Vec<HitTestTreeData<ActionContext>>,
     pub free: BTreeSet<usize>,
 }
-impl HitTestTreeContext {
+impl<ActionContext> HitTestTreeManager<ActionContext> {
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -124,7 +135,7 @@ impl HitTestTreeContext {
         }
     }
 
-    pub fn alloc(&mut self, data: HitTestTreeData) -> HitTestTreeRef {
+    pub fn alloc(&mut self, data: HitTestTreeData<ActionContext>) -> HitTestTreeRef {
         if let Some(f) = self.free.pop_first() {
             self.entities[f] = data;
             return HitTestTreeRef(f);
@@ -151,12 +162,12 @@ impl HitTestTreeContext {
     }
 
     #[inline]
-    pub fn get(&self, index: HitTestTreeRef) -> &HitTestTreeData {
+    pub fn get(&self, index: HitTestTreeRef) -> &HitTestTreeData<ActionContext> {
         &self.entities[index.0]
     }
 
     #[inline]
-    pub fn get_mut(&mut self, index: HitTestTreeRef) -> &mut HitTestTreeData {
+    pub fn get_mut(&mut self, index: HitTestTreeRef) -> &mut HitTestTreeData<ActionContext> {
         &mut self.entities[index.0]
     }
 
@@ -174,7 +185,11 @@ impl HitTestTreeContext {
     }
 
     pub fn dump(&self, root: HitTestTreeRef) {
-        fn rec(this: &HitTestTreeContext, x: HitTestTreeRef, indent: usize) {
+        fn rec<ActionContext>(
+            this: &HitTestTreeManager<ActionContext>,
+            x: HitTestTreeRef,
+            indent: usize,
+        ) {
             for _ in 0..indent {
                 print!("  ");
             }
