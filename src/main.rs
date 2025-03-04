@@ -14,20 +14,29 @@ use bg_worker::{
     BackgroundWork, BackgroundWorker, BackgroundWorkerEnqueueAccess,
     BackgroundWorkerEnqueueWeakAccess, BackgroundWorkerViewFeedback,
 };
+use color_factory::{
+    d2d1_color_f_from_hex_rgb, d2d1_color_f_from_websafe_hex_rgb, ui_color_from_hex_rgb,
+    ui_color_from_websafe_hex_rgb_with_alpha,
+};
 use component::app_header::AppHeaderView;
 use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
     ContainerVisualParams, SimpleImplicitAnimationParams, SimpleScalarAnimationParams,
     SpriteVisualParams,
 };
+use coordinate::*;
 use effect_builder::{
     ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams, TintEffectParams,
 };
 use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
+use hittest::*;
 use image::EncodableLayout;
+use input::*;
 use native_wrapper::NativeEvent;
+use parking_lot::RwLock;
 use subsystem::Subsystem;
+use surface_helper::draw_2d;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
@@ -46,7 +55,7 @@ use windows::{
         Graphics::{
             Direct2D::{
                 Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F},
-                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1DeviceContext,
+                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1Multithread,
             },
             Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             Direct3D11::{
@@ -55,10 +64,8 @@ use windows::{
                 D3D11_BOX, D3D11_BUFFER_DESC, D3D11_COMPARISON_ALWAYS, D3D11_CPU_ACCESS_READ,
                 D3D11_CPU_ACCESS_WRITE, D3D11_FILTER_MIN_MAG_MIP_POINT, D3D11_INPUT_ELEMENT_DESC,
                 D3D11_INPUT_PER_INSTANCE_DATA, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE,
-                D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_BLEND_DESC,
-                D3D11_RENDER_TARGET_VIEW_DESC, D3D11_RENDER_TARGET_VIEW_DESC_0,
-                D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC, D3D11_SUBRESOURCE_DATA,
-                D3D11_TEX2D_RTV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC,
+                D3D11_MAP_WRITE_DISCARD, D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SAMPLER_DESC,
+                D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC,
                 D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE,
                 D3D11_USAGE_STAGING, D3D11_VIEWPORT, ID3D11BlendState, ID3D11Buffer, ID3D11Device,
                 ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader,
@@ -95,10 +102,10 @@ use windows::{
                 CF_HDROP, DROPEFFECT_LINK, IDropTarget, IDropTarget_Impl, OleInitialize,
                 RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
             },
-            Threading::INFINITE,
+            Threading::{INFINITE, WaitForMultipleObjectsEx},
             WinRT::{
-                Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
-                DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
+                CreateDispatcherQueueController, DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT,
+                DispatcherQueueOptions,
             },
         },
         UI::{
@@ -126,8 +133,10 @@ use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 mod app_state;
 mod bg_worker;
+mod color_factory;
 mod component;
 mod composition_element_builder;
+mod coordinate;
 mod effect_builder;
 mod extra_bindings;
 mod hittest;
@@ -135,9 +144,7 @@ mod input;
 mod native_wrapper;
 mod source_reader;
 mod subsystem;
-
-use crate::hittest::*;
-use crate::input::*;
+mod surface_helper;
 
 type AppHitTestTreeManager = HitTestTreeManager<AppState>;
 
@@ -154,55 +161,6 @@ macro_rules! scoped_try {
 const fn timespan_ms(ms: u32) -> TimeSpan {
     TimeSpan {
         Duration: (10_000 * ms) as _,
-    }
-}
-
-const fn pixels_to_dip(pixels: u32, dpi: f32) -> f32 {
-    pixels as f32 * 96.0 / dpi
-}
-const fn signed_pixels_to_dip(pixels: i32, dpi: f32) -> f32 {
-    pixels as f32 * 96.0 / dpi
-}
-
-const fn dip_to_pixels(dip: f32, dpi: f32) -> f32 {
-    dip * dpi / 96.0
-}
-
-pub struct SizePixels {
-    pub width: u32,
-    pub height: u32,
-}
-impl SizePixels {
-    pub const fn to_dip(&self, dpi: f32) -> Size {
-        Size {
-            Width: pixels_to_dip(self.width, dpi),
-            Height: pixels_to_dip(self.height, dpi),
-        }
-    }
-}
-
-pub struct PointDIP {
-    pub x: f32,
-    pub y: f32,
-}
-impl PointDIP {
-    pub const fn make_rel_from(&self, other: &Self) -> Self {
-        Self {
-            x: self.x - other.x,
-            y: self.y - other.y,
-        }
-    }
-}
-
-pub struct RectDIP {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
-}
-impl RectDIP {
-    pub const fn contains(&self, p: &PointDIP) -> bool {
-        self.left <= p.x && p.x <= self.right && self.top <= p.y && p.y <= self.bottom
     }
 }
 
@@ -253,64 +211,45 @@ impl Drop for AppRuntime {
     }
 }
 
-const fn rgb_color_from_hex(hex: u32) -> Color {
-    Color {
-        R: ((hex >> 16) & 0xff) as _,
-        G: ((hex >> 8) & 0xff) as _,
-        B: (hex & 0xff) as _,
-        A: 255,
+struct D3D11CriticalSectionGuard<'a>(&'a ID3D11Multithread);
+impl<'a> Drop for D3D11CriticalSectionGuard<'a> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe {
+            self.0.Leave();
+        }
+    }
+}
+impl<'a> D3D11CriticalSectionGuard<'a> {
+    #[inline(always)]
+    pub fn enter(mt: &'a ID3D11Multithread) -> Self {
+        unsafe {
+            mt.Enter();
+        }
+        Self(mt)
     }
 }
 
-const fn rgb_color_from_websafe_hex(hex: u16) -> Color {
-    const fn e(x: u8) -> u8 {
-        x | (x << 4)
+struct D2D1CriticalSectionGuard<'a>(&'a ID2D1Multithread);
+impl<'a> Drop for D2D1CriticalSectionGuard<'a> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe {
+            self.0.Leave();
+        }
     }
-
-    Color {
-        R: e(((hex >> 8) & 0x0f) as _),
-        G: e(((hex >> 4) & 0x0f) as _),
-        B: e((hex & 0x0f) as _),
-        A: 255,
+}
+impl<'a> D2D1CriticalSectionGuard<'a> {
+    #[inline(always)]
+    pub fn enter(mt: &'a ID2D1Multithread) -> Self {
+        unsafe {
+            mt.Enter();
+        }
+        Self(mt)
     }
 }
 
-const fn d2d1_color_f_from_rgb_hex(hex: u32) -> D2D1_COLOR_F {
-    let ru = ((hex >> 16) & 0xff) as u8;
-    let gu = ((hex >> 8) & 0xff) as u8;
-    let bu = (hex & 0xff) as u8;
-
-    D2D1_COLOR_F {
-        r: ru as f32 / 255.0,
-        g: gu as f32 / 255.0,
-        b: bu as f32 / 255.0,
-        a: 1.0,
-    }
-}
-
-const BG_COLOR: Color = rgb_color_from_hex(0x202030);
-
-#[inline]
-fn draw_2d<T, E>(
-    surface: &CompositionDrawingSurface,
-    renderer: impl FnOnce(&ID2D1DeviceContext, &POINT) -> Result<T, E>,
-) -> Result<T, E>
-where
-    E: From<windows_core::Error>,
-{
-    let surface_interop: ICompositionDrawingSurfaceInterop = surface
-        .cast()
-        .expect("this surface does not support rendering with Direct2D");
-    let mut offset = MaybeUninit::uninit();
-    let dc: ID2D1DeviceContext = unsafe { surface_interop.BeginDraw(None, offset.as_mut_ptr())? };
-    let r = renderer(&dc, unsafe { offset.assume_init_ref() });
-    // Note: rendererがエラーでもEndDrawは必ずする
-    unsafe {
-        surface_interop.EndDraw()?;
-    }
-
-    r
-}
+const BG_COLOR: Color = ui_color_from_hex_rgb(0x202030);
 
 pub trait DpiHandler {
     #[allow(unused_variables)]
@@ -438,6 +377,14 @@ pub struct SpriteInstance {
     pub uv_st: [f32; 4],
 }
 
+pub struct SpriteInstanceBuffer {
+    buffer: ID3D11Buffer,
+    staging: ID3D11Buffer,
+    capacity: usize,
+    count: usize,
+    is_dirty: bool,
+}
+
 pub struct AtlasBaseGridView {
     root: SpriteVisual,
     swapchain: IDXGISwapChain2,
@@ -452,21 +399,18 @@ pub struct AtlasBaseGridView {
     sprite_instance_psh: ID3D11PixelShader,
     sprite_instance_base_vb: ID3D11Buffer,
     sprite_instance_input_layout: ID3D11InputLayout,
-    sprite_instance_buffer: RefCell<ID3D11Buffer>,
-    sprite_instance_buffer_staging: RefCell<ID3D11Buffer>,
-    sprite_instance_buffer_capacity: Cell<usize>,
-    sprite_instance_count: Cell<usize>,
-    sprite_instance_buffer_dirty: Cell<bool>,
+    sprite_instance_buffer: RwLock<SpriteInstanceBuffer>,
     tex_sampler: ID3D11SamplerState,
-    size_pixels: Cell<(u32, u32)>,
-    resize_order: Cell<Option<(u32, u32)>>,
-    offset_pixels: Cell<(f32, f32)>,
+    size_pixels: RwLock<(u32, u32)>,
+    resize_order: RwLock<Option<(u32, u32)>>,
+    offset_pixels: RwLock<(f32, f32)>,
     background_worker_enqueue_access: BackgroundWorkerEnqueueWeakAccess,
-    simple_atlas: RefCell<SimpleTextureAtlas>,
-    sprite_source_offset: RefCell<HashMap<PathBuf, (u32, u32)>>,
+    simple_atlas: RwLock<SimpleTextureAtlas>,
+    sprite_source_offset: RwLock<HashMap<PathBuf, (u32, u32)>>,
     d3d11_device: ID3D11Device,
     d3d11_device_context: ID3D11DeviceContext,
     d3d11_mt: ID3D11Multithread,
+    d2d1_mt: ID2D1Multithread,
     premul_blend_state: ID3D11BlendState,
 }
 impl AtlasBaseGridView {
@@ -629,7 +573,7 @@ impl AtlasBaseGridView {
         }
         let tex_sampler = unsafe { tex_sampler.assume_init().unwrap() };
 
-        let simple_atlas = RefCell::new(SimpleTextureAtlas::new(&init.subsystem.d3d11_device));
+        let simple_atlas = RwLock::new(SimpleTextureAtlas::new(&init.subsystem.d3d11_device));
 
         let d3d11_mt: ID3D11Multithread = init.subsystem.d3d11_imm_context.cast().unwrap();
         unsafe {
@@ -854,21 +798,24 @@ impl AtlasBaseGridView {
             sprite_instance_psh,
             sprite_instance_input_layout,
             sprite_instance_base_vb,
-            sprite_instance_buffer: RefCell::new(sprite_instance_buffer),
-            sprite_instance_buffer_staging: RefCell::new(sprite_instance_buffer_staging),
-            sprite_instance_buffer_capacity: Cell::new(sprite_instance_buffer_capacity),
-            sprite_instance_buffer_dirty: Cell::new(false),
-            sprite_instance_count: Cell::new(0),
+            sprite_instance_buffer: RwLock::new(SpriteInstanceBuffer {
+                buffer: sprite_instance_buffer,
+                staging: sprite_instance_buffer_staging,
+                capacity: sprite_instance_buffer_capacity,
+                count: 0,
+                is_dirty: false,
+            }),
             tex_sampler,
-            size_pixels: Cell::new((init_width_pixels, init_height_pixels)),
-            resize_order: Cell::new(None),
-            offset_pixels: Cell::new((0.0, 0.0)),
+            size_pixels: RwLock::new((init_width_pixels, init_height_pixels)),
+            resize_order: RwLock::new(None),
+            offset_pixels: RwLock::new((0.0, 0.0)),
             background_worker_enqueue_access: init.background_worker_enqueue_access.downgrade(),
             simple_atlas,
-            sprite_source_offset: RefCell::new(HashMap::new()),
+            sprite_source_offset: RwLock::new(HashMap::new()),
             d3d11_device: init.subsystem.d3d11_device.clone(),
             d3d11_device_context: init.subsystem.d3d11_imm_context.clone(),
             d3d11_mt,
+            d2d1_mt: init.subsystem.d2d1_factory.cast().unwrap(),
             premul_blend_state,
         }
     }
@@ -895,7 +842,7 @@ impl AtlasBaseGridView {
             })
             .unwrap();
 
-        self.resize_order.set(Some((new_width_px, new_height_px)));
+        *self.resize_order.write() = Some((new_width_px, new_height_px));
     }
 
     pub fn update_sprites(&self, sprites: &[SpriteInfo]) {
@@ -906,10 +853,13 @@ impl AtlasBaseGridView {
             return;
         };
 
-        if self.sprite_instance_buffer_capacity.get() < sprites.len() {
+        let _ = D3D11CriticalSectionGuard::enter(&self.d3d11_mt);
+        let mut sprite_instance_buffer = self.sprite_instance_buffer.write();
+
+        if sprite_instance_buffer.capacity < sprites.len() {
             // たりない
             let new_capacity =
-                self.sprite_instance_buffer_capacity.get() + Self::SPRITE_INSTANCE_CAPACITY_UNIT;
+                sprite_instance_buffer.capacity + Self::SPRITE_INSTANCE_CAPACITY_UNIT;
             let mut new_buf = core::mem::MaybeUninit::uninit();
             unsafe {
                 self.d3d11_device
@@ -927,8 +877,7 @@ impl AtlasBaseGridView {
                     )
                     .unwrap();
             }
-            self.sprite_instance_buffer
-                .replace(unsafe { new_buf.assume_init().unwrap() });
+            sprite_instance_buffer.buffer = unsafe { new_buf.assume_init().unwrap() };
             let mut new_buf_stg = MaybeUninit::uninit();
             unsafe {
                 self.d3d11_device
@@ -945,27 +894,25 @@ impl AtlasBaseGridView {
                         Some(new_buf_stg.as_mut_ptr()),
                     )
                     .unwrap();
-                let old_stg = self
-                    .sprite_instance_buffer_staging
-                    .replace(new_buf_stg.assume_init().unwrap());
+                let old_stg = core::mem::replace(
+                    &mut sprite_instance_buffer.staging,
+                    new_buf_stg.assume_init().unwrap(),
+                );
                 self.d3d11_mt.Enter();
                 self.d3d11_device_context
-                    .CopyResource(&*self.sprite_instance_buffer_staging.borrow(), &old_stg);
+                    .CopyResource(&sprite_instance_buffer.staging, &old_stg);
                 self.d3d11_device_context.Flush();
                 self.d3d11_mt.Leave();
             }
-            self.sprite_instance_buffer_capacity.set(new_capacity);
-            self.sprite_instance_buffer_dirty.set(true);
+            sprite_instance_buffer.capacity = new_capacity;
+            sprite_instance_buffer.is_dirty = true;
         }
 
-        unsafe {
-            self.d3d11_mt.Enter();
-        }
         let mut mapped = MaybeUninit::uninit();
         unsafe {
             self.d3d11_device_context
                 .Map(
-                    &*self.sprite_instance_buffer_staging.borrow(),
+                    &sprite_instance_buffer.staging,
                     0,
                     D3D11_MAP_WRITE,
                     0,
@@ -977,14 +924,13 @@ impl AtlasBaseGridView {
         for (n, x) in sprites.iter().enumerate() {
             let (ox, oy) = match self
                 .sprite_source_offset
-                .borrow_mut()
+                .write()
                 .entry(x.source_path.clone())
             {
                 // ロード済み
                 std::collections::hash_map::Entry::Occupied(o) => *o.get(),
                 std::collections::hash_map::Entry::Vacant(e) => {
-                    let Some((ox, oy)) = self.simple_atlas.borrow_mut().alloc(x.width, x.height)
-                    else {
+                    let Some((ox, oy)) = self.simple_atlas.write().alloc(x.width, x.height) else {
                         tracing::warn!("no suitable region(realloc or alloc page here...)");
                         continue;
                     };
@@ -995,14 +941,15 @@ impl AtlasBaseGridView {
                         Box::new({
                             let d3d11_device_context = self.d3d11_device_context.clone();
                             let d3d11_mt = self.d3d11_mt.clone();
-                            let simple_atlas_resource = self.simple_atlas.borrow().resource.clone();
+                            let simple_atlas_resource = self.simple_atlas.read().resource.clone();
                             let (width, height) = (x.width, x.height);
 
                             move |path, di| {
                                 // TODO: HDR対応
                                 let img_formatted = di.to_rgba8();
                                 unsafe {
-                                    d3d11_mt.Enter();
+                                    let _ = D3D11CriticalSectionGuard::enter(&d3d11_mt);
+
                                     d3d11_device_context.UpdateSubresource(
                                         &simple_atlas_resource,
                                         0,
@@ -1018,7 +965,6 @@ impl AtlasBaseGridView {
                                         img_formatted.width() * 4,
                                         0,
                                     );
-                                    d3d11_mt.Leave();
                                 }
                                 tracing::info!({?path, ox, oy}, "LoadSpriteComplete");
                             }
@@ -1045,23 +991,23 @@ impl AtlasBaseGridView {
                     ],
                 );
 
-                self.sprite_instance_buffer_dirty.set(true);
+                sprite_instance_buffer.is_dirty = true;
             }
         }
         unsafe {
             self.d3d11_device_context
-                .Unmap(&*self.sprite_instance_buffer_staging.borrow(), 0);
-            self.d3d11_mt.Leave();
+                .Unmap(&sprite_instance_buffer.staging, 0);
         }
-        self.sprite_instance_count.set(sprites.len());
+
+        sprite_instance_buffer.count = sprites.len();
     }
 
     pub fn set_offset(&self, offset_x: f32, offset_y: f32) {
-        self.offset_pixels.set((offset_x, offset_y));
+        *self.offset_pixels.write() = (offset_x, offset_y);
     }
 
-    pub fn update_content(&self, subsystem: &Subsystem) {
-        if let Some((req_width_px, req_height_px)) = self.resize_order.replace(None) {
+    pub fn update_content(&self) {
+        if let Some((req_width_px, req_height_px)) = self.resize_order.write().take() {
             unsafe {
                 self.swapchain
                     .ResizeBuffers(
@@ -1074,19 +1020,16 @@ impl AtlasBaseGridView {
                     .unwrap();
             }
 
-            self.size_pixels.set((req_width_px, req_height_px));
+            *self.size_pixels.write() = (req_width_px, req_height_px);
         }
 
-        let (width_px, height_px) = self.size_pixels.get();
-        let (offset_x, offset_y) = self.offset_pixels.get();
+        let (width_px, height_px) = *self.size_pixels.read();
+        let (offset_x, offset_y) = *self.offset_pixels.read();
 
-        unsafe {
-            self.d3d11_mt.Enter();
-        }
+        let c = D3D11CriticalSectionGuard::enter(&self.d3d11_mt);
         let mut mapped = core::mem::MaybeUninit::uninit();
         unsafe {
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .Map(
                     &self.render_params_cb,
                     0,
@@ -1108,13 +1051,12 @@ impl AtlasBaseGridView {
             );
         }
         unsafe {
-            subsystem.d3d11_imm_context.Unmap(&self.render_params_cb, 0);
+            self.d3d11_device_context.Unmap(&self.render_params_cb, 0);
         }
 
         let mut mapped = core::mem::MaybeUninit::uninit();
         unsafe {
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .Map(
                     &self.texture_preview_cb,
                     0,
@@ -1132,49 +1074,36 @@ impl AtlasBaseGridView {
             );
         }
         unsafe {
-            subsystem
-                .d3d11_imm_context
-                .Unmap(&self.texture_preview_cb, 0);
+            self.d3d11_device_context.Unmap(&self.texture_preview_cb, 0);
         }
 
-        if self.sprite_instance_buffer_dirty.replace(false) {
+        let mut sprite_instance_buffer = self.sprite_instance_buffer.write();
+        if core::mem::replace(&mut sprite_instance_buffer.is_dirty, false) {
             unsafe {
-                subsystem.d3d11_imm_context.CopyResource(
-                    &*self.sprite_instance_buffer.borrow(),
-                    &*self.sprite_instance_buffer_staging.borrow(),
+                self.d3d11_device_context.CopyResource(
+                    &sprite_instance_buffer.buffer,
+                    &sprite_instance_buffer.staging,
                 );
             }
         }
+        drop(sprite_instance_buffer);
 
-        unsafe {
-            self.d3d11_mt.Leave();
-        }
+        drop(c);
 
         let bb = unsafe { self.swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap() };
         let mut rtv = core::mem::MaybeUninit::uninit();
         unsafe {
-            subsystem
-                .d3d11_device
-                .CreateRenderTargetView(
-                    &bb,
-                    Some(&D3D11_RENDER_TARGET_VIEW_DESC {
-                        ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D,
-                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                        Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 {
-                            Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 },
-                        },
-                    }),
-                    Some(rtv.as_mut_ptr()),
-                )
+            self.d3d11_device
+                .CreateRenderTargetView(&bb, None, Some(rtv.as_mut_ptr()))
                 .unwrap()
         };
         let rtv = unsafe { rtv.assume_init().unwrap() };
+
+        let c = D2D1CriticalSectionGuard::enter(&self.d2d1_mt);
         unsafe {
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .RSSetViewports(Some(&[D3D11_VIEWPORT {
                     TopLeftX: 0.0,
                     TopLeftY: 0.0,
@@ -1183,52 +1112,42 @@ impl AtlasBaseGridView {
                     MinDepth: 0.0,
                     MaxDepth: 1.0,
                 }]));
-            subsystem.d3d11_imm_context.RSSetScissorRects(Some(&[RECT {
+            self.d3d11_device_context.RSSetScissorRects(Some(&[RECT {
                 left: 0,
                 top: 0,
                 right: width_px as _,
                 bottom: height_px as _,
             }]));
-            subsystem.d3d11_imm_context.VSSetShader(&self.vsh, None);
-            subsystem.d3d11_imm_context.PSSetShader(&self.psh, None);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context.VSSetShader(&self.vsh, None);
+            self.d3d11_device_context.PSSetShader(&self.psh, None);
+            self.d3d11_device_context
                 .PSSetConstantBuffers(0, Some(&[Some(self.render_params_cb.clone())]));
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-            subsystem.d3d11_imm_context.Draw(4, 0);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context.Draw(4, 0);
+            self.d3d11_device_context
                 .OMSetBlendState(&self.premul_blend_state, None, u32::MAX);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .VSSetShader(&self.sprite_instance_vsh, None);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .PSSetShader(&self.sprite_instance_psh, None);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .VSSetConstantBuffers(0, Some(&[Some(self.texture_preview_cb.clone())]));
-            subsystem
-                .d3d11_imm_context
-                .PSSetShaderResources(0, Some(&[Some(self.simple_atlas.borrow().srv.clone())]));
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
+                .PSSetShaderResources(0, Some(&[Some(self.simple_atlas.read().srv.clone())]));
+            self.d3d11_device_context
                 .PSSetSamplers(0, Some(&[Some(self.tex_sampler.clone())]));
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .IASetInputLayout(&self.sprite_instance_input_layout);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-            subsystem.d3d11_imm_context.IASetVertexBuffers(
+            self.d3d11_device_context.IASetVertexBuffers(
                 0,
                 2,
                 Some(
                     [
                         Some(self.sprite_instance_base_vb.clone()),
-                        Some(self.sprite_instance_buffer.borrow().clone()),
+                        Some(self.sprite_instance_buffer.read().buffer.clone()),
                     ]
                     .as_ptr(),
                 ),
@@ -1241,43 +1160,41 @@ impl AtlasBaseGridView {
                 ),
                 Some([0u32, 0u32].as_ptr()),
             );
-            subsystem.d3d11_imm_context.DrawInstanced(
+            self.d3d11_device_context.DrawInstanced(
                 4,
-                self.sprite_instance_count.get() as _,
+                self.sprite_instance_buffer.read().count as _,
                 0,
                 0,
             );
-            /*subsystem
-                .d3d11_imm_context
+            /*self.d3d11_device_context
                 .VSSetShader(&self.texture_preview_vsh, None);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .PSSetShader(&self.texture_preview_psh, None);
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .VSSetConstantBuffers(0, Some(&[Some(self.texture_preview_cb.clone())]));
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .PSSetShaderResources(0, Some(&[Some(self.texture_preview_srv.clone())]));
-            subsystem
-                .d3d11_imm_context
+            self.d3d11_device_context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-            subsystem.d3d11_imm_context.IASetVertexBuffers(
+            self.d3d11_device_context.IASetVertexBuffers(
                 0,
                 1,
                 Some([Some(self.texture_preview_vb.clone())].as_ptr()),
                 Some(&(core::mem::size_of::<[f32; 2]>() as u32) as *const _),
                 Some(&0u32 as *const _),
             );
-            subsystem.d3d11_imm_context.Draw(4, 0);*/
-            subsystem.d3d11_imm_context.PSSetShader(None, None);
-            subsystem.d3d11_imm_context.VSSetShader(None, None);
-            subsystem.d3d11_imm_context.Flush();
+            self.d3d11_device_context.Draw(4, 0);*/
+            self.d3d11_device_context.PSSetShader(None, None);
+            self.d3d11_device_context.VSSetShader(None, None);
+            self.d3d11_device_context.Flush();
+            self.d3d11_device_context.ClearState();
         }
 
         unsafe {
             self.swapchain.Present(0, DXGI_PRESENT(0)).ok().unwrap();
         }
+
+        drop(c);
     }
 }
 
@@ -1313,12 +1230,7 @@ pub struct CurrentSelectedSpriteMarkerView {
 impl CurrentSelectedSpriteMarkerView {
     const CORNER_RADIUS: f32 = 4.0;
     const THICKNESS: f32 = 2.0;
-    const COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
-        r: 0.0,
-        g: 1.0,
-        b: 0.0,
-        a: 1.0,
-    };
+    const COLOR: D2D1_COLOR_F = d2d1_color_f_from_hex_rgb(0x00ff00);
 
     pub fn new(init: &mut ViewInitContext) -> Self {
         let surface = init
@@ -1524,6 +1436,7 @@ impl SpriteListToggleButtonView {
     const BUTTON_SIZE: f32 = 20.0;
     const ICON_SIZE: f32 = 7.0;
     const ICON_THICKNESS: f32 = 1.25;
+    const ICON_COLOR: D2D1_COLOR_F = d2d1_color_f_from_hex_rgb(0xf0f0f0);
 
     pub fn new(init: &mut ViewInitContext) -> Self {
         let button_size_px = init.dip_to_pixels(Self::BUTTON_SIZE);
@@ -1545,17 +1458,7 @@ impl SpriteListToggleButtonView {
                 ));
             }
 
-            let brush = unsafe {
-                dc.CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.9,
-                        g: 0.9,
-                        b: 0.9,
-                        a: 1.0,
-                    },
-                    None,
-                )?
-            };
+            let brush = unsafe { dc.CreateSolidColorBrush(&Self::ICON_COLOR, None)? };
 
             unsafe {
                 dc.Clear(None);
@@ -1631,21 +1534,7 @@ impl SpriteListToggleButtonView {
                     init.signed_pixels_to_dip(offset.x),
                     init.signed_pixels_to_dip(offset.y),
                 ));
-            }
 
-            let brush = unsafe {
-                dc.CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 1.0,
-                    },
-                    None,
-                )?
-            };
-
-            unsafe {
                 dc.Clear(None);
                 dc.FillEllipse(
                     &D2D1_ELLIPSE {
@@ -1656,7 +1545,7 @@ impl SpriteListToggleButtonView {
                         radiusX: Self::BUTTON_SIZE * 0.5,
                         radiusY: Self::BUTTON_SIZE * 0.5,
                     },
-                    &brush,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
                 );
             }
 
@@ -1870,12 +1759,9 @@ impl SpriteListCellView {
     const FRAME_TEX_SIZE: f32 = 24.0;
     const CORNER_RADIUS: f32 = 8.0;
     const CELL_HEIGHT: f32 = 20.0;
-    const LABEL_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 1.0,
-    };
+    const LABEL_COLOR: D2D1_COLOR_F = D2D1_COLOR_F_WHITE;
+    const BG_COLOR: windows::UI::Color = ui_color_from_websafe_hex_rgb_with_alpha(0xccc, 32);
+    const ACTIVE_BG_COLOR: windows::UI::Color = ui_color_from_websafe_hex_rgb_with_alpha(0x4af, 64);
 
     fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
         let s = subsystem
@@ -1891,11 +1777,7 @@ impl SpriteListCellView {
                     signed_pixels_to_dip(offset.x, dpi),
                     signed_pixels_to_dip(offset.y, dpi),
                 ));
-            }
 
-            let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)? };
-
-            unsafe {
                 dc.Clear(None);
                 dc.FillRoundedRectangle(
                     &D2D1_ROUNDED_RECT {
@@ -1908,7 +1790,7 @@ impl SpriteListCellView {
                         radiusX: Self::CORNER_RADIUS,
                         radiusY: Self::CORNER_RADIUS,
                     },
-                    &brush,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
                 );
             }
 
@@ -1941,11 +1823,7 @@ impl SpriteListCellView {
         draw_2d(&label_surface, |dc, offset| {
             unsafe {
                 dc.SetDpi(init.dpi, init.dpi);
-            }
 
-            let brush = unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None)? };
-
-            unsafe {
                 dc.Clear(None);
                 dc.DrawTextLayout(
                     D2D_POINT_2F {
@@ -1953,7 +1831,7 @@ impl SpriteListCellView {
                         y: init.signed_pixels_to_dip(offset.y),
                     },
                     &tl,
-                    &brush,
+                    &dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None)?,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                 );
             }
@@ -1992,12 +1870,7 @@ impl SpriteListCellView {
                 &init.subsystem,
                 &TintEffectParams {
                     source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
-                    color: Some(windows::UI::Color {
-                        A: 32,
-                        R: 224,
-                        G: 224,
-                        B: 224,
-                    }),
+                    color: Some(Self::BG_COLOR),
                 }
                 .instantiate()
                 .unwrap(),
@@ -2014,12 +1887,7 @@ impl SpriteListCellView {
                 &init.subsystem,
                 &TintEffectParams {
                     source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
-                    color: Some(windows::UI::Color {
-                        A: 64,
-                        R: 64,
-                        G: 160,
-                        B: 255,
-                    }),
+                    color: Some(Self::ACTIVE_BG_COLOR),
                 }
                 .instantiate()
                 .unwrap(),
@@ -2154,11 +2022,7 @@ impl SpriteListCellView {
         draw_2d(&label_surface, |dc, offset| {
             unsafe {
                 dc.SetDpi(dpi, dpi);
-            }
 
-            let brush = unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None)? };
-
-            unsafe {
                 dc.Clear(None);
                 dc.DrawTextLayout(
                     D2D_POINT_2F {
@@ -2166,7 +2030,7 @@ impl SpriteListCellView {
                         y: signed_pixels_to_dip(offset.y, dpi),
                     },
                     &tl,
-                    &brush,
+                    &dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None)?,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                 );
             }
@@ -2207,27 +2071,12 @@ impl SpriteListPaneView {
     const CORNER_RADIUS: f32 = 12.0;
     const FRAME_TEX_SIZE: f32 = 32.0;
     const BLUR_AMOUNT: f32 = 27.0;
-    const SURFACE_COLOR: windows::UI::Color = windows::UI::Color {
-        R: 255,
-        G: 255,
-        B: 255,
-        A: 24,
-    };
+    const SURFACE_COLOR: windows::UI::Color = ui_color_from_websafe_hex_rgb_with_alpha(0xfff, 24);
     const SPACING: f32 = 8.0;
     const ADJUST_AREA_THICKNESS: f32 = 4.0;
     const INIT_WIDTH: f32 = 280.0;
-    const HEADER_LABEL_MAIN_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 1.0,
-    };
-    const HEADER_LABEL_SHADOW_COLOR: D2D1_COLOR_F = D2D1_COLOR_F {
-        r: 0.1,
-        g: 0.1,
-        b: 0.1,
-        a: 1.0,
-    };
+    const HEADER_LABEL_MAIN_COLOR: D2D1_COLOR_F = d2d1_color_f_from_websafe_hex_rgb(0xfff);
+    const HEADER_LABEL_SHADOW_COLOR: D2D1_COLOR_F = d2d1_color_f_from_websafe_hex_rgb(0x111);
     const TRANSITION_DURATION: TimeSpan = timespan_ms(250);
     const CELL_AREA_PADDINGS: RectDIP = RectDIP {
         left: 16.0,
@@ -2238,37 +2087,29 @@ impl SpriteListPaneView {
 
     fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
         let s = subsystem
-            .new_2d_drawing_surface(Size {
-                Width: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
-                Height: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
-            })
+            .new_2d_drawing_surface(size_sq(dip_to_pixels(Self::FRAME_TEX_SIZE, dpi)))
             .unwrap();
         draw_2d(&s, |dc, offset| {
             unsafe {
                 dc.SetDpi(dpi, dpi);
-            }
+                dc.SetTransform(&Matrix3x2::translation(
+                    signed_pixels_to_dip(offset.x, dpi),
+                    signed_pixels_to_dip(offset.y, dpi),
+                ));
 
-            let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)? };
-
-            let offs_dip = D2D_POINT_2F {
-                x: signed_pixels_to_dip(offset.x, dpi),
-                y: signed_pixels_to_dip(offset.y, dpi),
-            };
-
-            unsafe {
                 dc.Clear(None);
                 dc.FillRoundedRectangle(
                     &D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
-                            left: offs_dip.x,
-                            top: offs_dip.y,
-                            right: offs_dip.x + Self::FRAME_TEX_SIZE,
-                            bottom: offs_dip.y + Self::FRAME_TEX_SIZE,
+                            left: 0.0,
+                            top: 0.0,
+                            right: Self::FRAME_TEX_SIZE,
+                            bottom: Self::FRAME_TEX_SIZE,
                         },
                         radiusX: Self::CORNER_RADIUS,
                         radiusY: Self::CORNER_RADIUS,
                     },
-                    &brush,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
                 );
             }
 
@@ -2383,11 +2224,7 @@ impl SpriteListPaneView {
         draw_2d(&header_surface, |dc, offset| {
             unsafe {
                 dc.SetDpi(init.dpi, init.dpi);
-            }
 
-            let brush = unsafe { dc.CreateSolidColorBrush(&Self::HEADER_LABEL_MAIN_COLOR, None)? };
-
-            unsafe {
                 dc.Clear(None);
                 dc.DrawTextLayout(
                     D2D_POINT_2F {
@@ -2395,7 +2232,7 @@ impl SpriteListPaneView {
                         y: init.signed_pixels_to_dip(offset.y),
                     },
                     &tl,
-                    &brush,
+                    &dc.CreateSolidColorBrush(&Self::HEADER_LABEL_MAIN_COLOR, None)?,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                 );
             }
@@ -2413,12 +2250,7 @@ impl SpriteListPaneView {
         draw_2d(&header_surface_w, |dc, offset| {
             unsafe {
                 dc.SetDpi(init.dpi, init.dpi);
-            }
 
-            let brush =
-                unsafe { dc.CreateSolidColorBrush(&Self::HEADER_LABEL_SHADOW_COLOR, None)? };
-
-            unsafe {
                 dc.Clear(None);
                 dc.DrawTextLayout(
                     D2D_POINT_2F {
@@ -2426,7 +2258,7 @@ impl SpriteListPaneView {
                         y: init.signed_pixels_to_dip(offset.y) + 9.0,
                     },
                     &tl,
-                    &brush,
+                    &dc.CreateSolidColorBrush(&Self::HEADER_LABEL_SHADOW_COLOR, None)?,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                 );
             }
@@ -3086,39 +2918,30 @@ pub struct FileDragAndDropOverlayView {
 }
 impl FileDragAndDropOverlayView {
     pub fn new(init: &mut ViewInitContext) -> Self {
-        let composite_effect = CompositeEffectParams {
-            sources: &[
-                GaussianBlurEffectParams {
-                    source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
-                    blur_amount: None,
-                    name: Some(h!("Blur")),
-                }
-                .instantiate()
-                .unwrap()
-                .cast()
-                .unwrap(),
-                ColorSourceEffectParams {
-                    color: Some(windows::UI::Color {
-                        R: 255,
-                        G: 255,
-                        B: 255,
-                        A: 64,
-                    }),
-                }
-                .instantiate()
-                .unwrap()
-                .cast()
-                .unwrap(),
-            ],
-            mode: Some(CanvasComposite::SourceOver),
-        }
-        .instantiate()
-        .unwrap();
         let effect_factory = init
             .subsystem
             .compositor
             .CreateEffectFactoryWithProperties(
-                &composite_effect,
+                &CompositeEffectParams::new(&[
+                    GaussianBlurEffectParams::new(
+                        &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                    )
+                    .name(h!("Blur"))
+                    .instantiate()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                    ColorSourceEffectParams {
+                        color: Some(ui_color_from_websafe_hex_rgb_with_alpha(0xfff, 64)),
+                    }
+                    .instantiate()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+                ])
+                .mode(CanvasComposite::SourceOver)
+                .instantiate()
+                .unwrap(),
                 &windows_collections::IIterable::<HSTRING>::from(vec![
                     h!("Blur.BlurAmount").clone(),
                 ]),
@@ -3183,39 +3006,25 @@ impl FileDragAndDropOverlayView {
                 Height: init.dip_to_pixels(metrics.height),
             })
             .unwrap();
-        {
-            let interop: ICompositionDrawingSurfaceInterop = label_surface.cast().unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                }
-
-                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&d2d1_color_f_from_rgb_hex(0xcccccc), None) });
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawTextLayout(
-                        D2D_POINT_2F {
-                            x: init.signed_pixels_to_dip(offset.x),
-                            y: init.signed_pixels_to_dip(offset.y),
-                        },
-                        &label,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&label_surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
+
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x),
+                        y: init.signed_pixels_to_dip(offset.y),
+                    },
+                    &label,
+                    &dc.CreateSolidColorBrush(&d2d1_color_f_from_websafe_hex_rgb(0xccc), None)?,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
             }
-            r.unwrap();
-        }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
         let label = SpriteVisualParams::new(
             &CompositionSurfaceBrushParams::new(&label_surface)
                 .instantiate(&init.subsystem.compositor)
@@ -3306,7 +3115,7 @@ impl FileDragAndDropOverlayView {
 }
 
 struct AppWindowHitTestTreeActionHandler {
-    grid_view: Rc<AtlasBaseGridView>,
+    grid_view: Arc<AtlasBaseGridView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     drag_data: Cell<Option<(f32, f32, f32, f32)>>,
     dpi: Cell<f32>,
@@ -3325,7 +3134,7 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     ) -> EventContinueControl {
         if sender == self.ht_root {
             let dpi = self.dpi.get();
-            let (current_offset_x, current_offset_y) = self.grid_view.offset_pixels.get();
+            let (current_offset_x, current_offset_y) = *self.grid_view.offset_pixels.read();
             self.drag_data.set(Some((
                 current_offset_x,
                 current_offset_y,
@@ -3407,7 +3216,7 @@ impl DpiHandler for AppWindowDpiHandler {
 struct AppWindowPresenter {
     root: ContainerVisual,
     ht_root: HitTestTreeRef,
-    grid_view: Rc<AtlasBaseGridView>,
+    grid_view: Arc<AtlasBaseGridView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     sprite_list_pane: SpriteListPanePresenter,
     header_view: AppHeaderView,
@@ -3448,7 +3257,7 @@ impl AppWindowPresenter {
             action_handler: None,
         });
 
-        let grid_view = Rc::new(AtlasBaseGridView::new(&mut init.for_view, 128, 128));
+        let grid_view = Arc::new(AtlasBaseGridView::new(&mut init.for_view, 128, 128));
         grid_view.resize(
             init_client_size_pixels.width,
             init_client_size_pixels.height,
@@ -3497,7 +3306,7 @@ impl AppWindowPresenter {
         init.dpi_handlers.push(Rc::downgrade(&dpi_handler) as _);
 
         init.app_state.borrow_mut().register_sprites_view_feedback({
-            let grid_view = Rc::downgrade(&grid_view);
+            let grid_view = Arc::downgrade(&grid_view);
             let selected_sprite_marker_view = Rc::downgrade(&selected_sprite_marker_view);
             let mut last_selected_index = None;
 
@@ -3894,10 +3703,6 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
         drop(glock);
         drop(data);
 
-        if let Some(m) = self.app_state.upgrade() {
-            m.borrow_mut().add_sprites(sprites);
-        }
-
         unsafe {
             self.dd_helper.Drop(
                 pdataobj.unwrap(),
@@ -3908,6 +3713,10 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
         self.overlay_view.hide();
         unsafe {
             core::ptr::write(pdweffect, DROPEFFECT_LINK);
+        }
+
+        if let Some(m) = self.app_state.upgrade() {
+            m.borrow_mut().add_sprites(sprites);
         }
 
         Ok(())
@@ -4024,8 +3833,8 @@ fn main() {
     }
 
     let mut bg_worker_vf = vec![None; background_worker.worker_count()];
-    let bg_worker_vf_update_callback: Rc<RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>> =
-        Rc::new(RefCell::new(Vec::new()));
+    let bg_worker_vf_update_callback =
+        Rc::new(RefCell::new(Vec::<Box<dyn FnMut(&[Option<String>])>>::new()));
     let app_state = Rc::new(RefCell::new(AppState::new()));
 
     let mut app_window_state_model = AppWindowStateModel::new(
@@ -4035,8 +3844,6 @@ fn main() {
         &background_worker,
         &bg_worker_vf_update_callback,
     );
-    let dd_helper: IDropTargetHelper =
-        unsafe { CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER).unwrap() };
     unsafe {
         RegisterDragDrop(
             hw,
@@ -4046,20 +3853,13 @@ fn main() {
                     .root_presenter
                     .file_dnd_overlay
                     .clone(),
-                dd_helper,
+                dd_helper: CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
+                    .unwrap(),
                 app_state: Rc::downgrade(&app_state),
             }),
         )
         .unwrap();
     }
-
-    let grid_view_render_waits = unsafe {
-        app_window_state_model
-            .root_presenter
-            .grid_view
-            .swapchain
-            .GetFrameLatencyWaitableObject()
-    };
 
     unsafe {
         SetWindowLongPtrW(
@@ -4069,6 +3869,42 @@ fn main() {
         );
     }
 
+    let render_thread_close_event = Arc::new(NativeEvent::new(true, None).unwrap());
+    let render_thread = {
+        let close_event = render_thread_close_event.clone();
+        let grid_view = app_window_state_model.root_presenter.grid_view.clone();
+
+        std::thread::Builder::new()
+            .name("RenderThread".into())
+            .spawn(move || {
+                let grid_view_render_waits = unsafe {
+                    NativeEvent::from_raw(grid_view.swapchain.GetFrameLatencyWaitableObject())
+                };
+
+                loop {
+                    let r = unsafe {
+                        WaitForMultipleObjectsEx(
+                            &[close_event.handle(), grid_view_render_waits.handle()],
+                            false,
+                            INFINITE,
+                            false,
+                        )
+                    };
+
+                    if r.0 == WAIT_OBJECT_0.0 {
+                        // close
+                        break;
+                    }
+
+                    if r.0 == WAIT_OBJECT_0.0 + 1 {
+                        // render grid
+                        grid_view.update_content();
+                    }
+                }
+            })
+            .unwrap()
+    };
+
     unsafe {
         let _ = ShowWindow(hw, SW_SHOW);
     }
@@ -4077,7 +3913,7 @@ fn main() {
     'app: loop {
         let r = unsafe {
             MsgWaitForMultipleObjects(
-                Some(&[ui_thread_wakeup_event.handle(), grid_view_render_waits]),
+                Some(&[ui_thread_wakeup_event.handle()]),
                 false,
                 INFINITE,
                 QS_ALLINPUT,
@@ -4109,14 +3945,6 @@ fn main() {
             continue;
         }
         if r.0 == WAIT_OBJECT_0.0 + 1 {
-            // update grid view
-            app_window_state_model
-                .root_presenter
-                .grid_view
-                .update_content(&subsystem);
-            continue;
-        }
-        if r.0 == WAIT_OBJECT_0.0 + 2 {
             while unsafe { PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE).as_bool() } {
                 if unsafe { msg.assume_init_ref().message == WM_QUIT } {
                     break 'app;
@@ -4134,6 +3962,8 @@ fn main() {
         unreachable!();
     }
 
+    render_thread_close_event.signal();
+    render_thread.join().unwrap();
     background_worker.teardown();
     unsafe {
         SetWindowLongPtrW(hw, GWLP_USERDATA, 0);

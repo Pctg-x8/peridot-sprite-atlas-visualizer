@@ -26,6 +26,10 @@ impl NativeEvent {
         Ok(Self(h))
     }
 
+    pub const unsafe fn from_raw(h: HANDLE) -> Self {
+        Self(h)
+    }
+
     #[inline(always)]
     pub fn signal(&self) {
         unsafe {

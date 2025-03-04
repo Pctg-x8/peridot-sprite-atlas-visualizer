@@ -14,6 +14,7 @@ tracing = "0.1"
 walkdir = "2"
 crossbeam = { version = "0.8.4", features = ["crossbeam-deque"] }
 image = "0.25.5"
+parking_lot = "0.12.3"
 
 [dependencies.windows]
 version = "0.60"

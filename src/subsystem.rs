@@ -14,8 +14,8 @@ use windows::{
                 CreatePresentationFactory, IPresentationFactory, IPresentationManager,
             },
             Direct2D::{
-                D2D1_DEBUG_LEVEL_WARNING, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                D2D1CreateFactory, ID2D1Device, ID2D1Factory1,
+                D2D1_DEBUG_LEVEL_WARNING, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_MULTI_THREADED,
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Device, ID2D1Factory1,
             },
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -141,6 +141,7 @@ impl TextFormatStore {
 pub struct Subsystem {
     pub d3d11_device: ID3D11Device,
     pub d3d11_imm_context: ID3D11DeviceContext,
+    pub d2d1_factory: ID2D1Factory1,
     pub d2d1_device: ID2D1Device,
     pub dwrite_factory: IDWriteFactory1,
     pub text_format_store: TextFormatStore,
@@ -186,7 +187,7 @@ impl Subsystem {
 
         let d2d1_factory: ID2D1Factory1 = unsafe {
             D2D1CreateFactory(
-                D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                D2D1_FACTORY_TYPE_MULTI_THREADED,
                 Some(&D2D1_FACTORY_OPTIONS {
                     debugLevel: D2D1_DEBUG_LEVEL_WARNING,
                 }),
@@ -246,6 +247,7 @@ impl Subsystem {
         Self {
             d3d11_device,
             d3d11_imm_context,
+            d2d1_factory,
             d2d1_device,
             dwrite_factory,
             text_format_store,
