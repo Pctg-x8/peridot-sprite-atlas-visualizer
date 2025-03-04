@@ -853,14 +853,14 @@ impl AtlasBaseGridView {
             return;
         };
 
-        let _ = D3D11CriticalSectionGuard::enter(&self.d3d11_mt);
+        let c = D3D11CriticalSectionGuard::enter(&self.d3d11_mt);
         let mut sprite_instance_buffer = self.sprite_instance_buffer.write();
 
         if sprite_instance_buffer.capacity < sprites.len() {
             // たりない
             let new_capacity =
                 sprite_instance_buffer.capacity + Self::SPRITE_INSTANCE_CAPACITY_UNIT;
-            let mut new_buf = core::mem::MaybeUninit::uninit();
+            let mut new_buf = MaybeUninit::uninit();
             unsafe {
                 self.d3d11_device
                     .CreateBuffer(
@@ -948,7 +948,7 @@ impl AtlasBaseGridView {
                                 // TODO: HDR対応
                                 let img_formatted = di.to_rgba8();
                                 unsafe {
-                                    let _ = D3D11CriticalSectionGuard::enter(&d3d11_mt);
+                                    let c = D3D11CriticalSectionGuard::enter(&d3d11_mt);
 
                                     d3d11_device_context.UpdateSubresource(
                                         &simple_atlas_resource,
@@ -965,6 +965,8 @@ impl AtlasBaseGridView {
                                         img_formatted.width() * 4,
                                         0,
                                     );
+
+                                    drop(c);
                                 }
                                 tracing::info!({?path, ox, oy}, "LoadSpriteComplete");
                             }
@@ -1000,6 +1002,7 @@ impl AtlasBaseGridView {
         }
 
         sprite_instance_buffer.count = sprites.len();
+        drop(c);
     }
 
     pub fn set_offset(&self, offset_x: f32, offset_y: f32) {
@@ -1184,8 +1187,6 @@ impl AtlasBaseGridView {
                 Some(&0u32 as *const _),
             );
             self.d3d11_device_context.Draw(4, 0);*/
-            self.d3d11_device_context.PSSetShader(None, None);
-            self.d3d11_device_context.VSSetShader(None, None);
             self.d3d11_device_context.Flush();
             self.d3d11_device_context.ClearState();
         }
@@ -1419,6 +1420,79 @@ impl CurrentSelectedSpriteMarkerView {
                     Z: 0.0,
                 },
             )
+            .unwrap();
+    }
+}
+
+pub struct SpriteAtlasBorderView {
+    root: SpriteVisual,
+}
+impl SpriteAtlasBorderView {
+    pub fn new(init: &mut ViewInitContext) -> Self {
+        let frame_surface = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: 4.0,
+                Height: 4.0,
+            })
+            .unwrap();
+        draw_2d(&frame_surface, |dc, offset| {
+            unsafe {
+                dc.Clear(None);
+                dc.DrawRectangle(
+                    &D2D_RECT_F {
+                        left: offset.x as f32 + 0.5,
+                        top: offset.y as f32 + 0.5,
+                        right: offset.x as f32 + 4.0 - 0.5,
+                        bottom: offset.y as f32 + 4.0 - 0.5,
+                    },
+                    &dc.CreateSolidColorBrush(&d2d1_color_f_from_websafe_hex_rgb(0xf00), None)?,
+                    1.0,
+                    None,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        let root = SpriteVisualParams::new(
+            &CompositionNineGridBrushParams::new(
+                &CompositionSurfaceBrushParams::new(&frame_surface)
+                    .stretch(CompositionStretch::Fill)
+                    .instantiate(&init.subsystem.compositor)
+                    .unwrap(),
+            )
+            .insets(1.0)
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+        )
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        Self { root }
+    }
+
+    pub fn mount(&self, children: &VisualCollection) {
+        children.InsertAtTop(&self.root).unwrap();
+    }
+
+    pub fn set_size(&self, size: SizePixels) {
+        self.root
+            .SetSize(Vector2 {
+                X: size.width as _,
+                Y: size.height as _,
+            })
+            .unwrap();
+    }
+
+    pub fn set_view_offset(&self, offset_x_pixels: f32, offset_y_pixels: f32) {
+        self.root
+            .SetOffset(Vector3 {
+                X: -offset_x_pixels,
+                Y: -offset_y_pixels,
+                Z: 0.0,
+            })
             .unwrap();
     }
 }
@@ -3116,6 +3190,7 @@ impl FileDragAndDropOverlayView {
 
 struct AppWindowHitTestTreeActionHandler {
     grid_view: Arc<AtlasBaseGridView>,
+    sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     drag_data: Cell<Option<(f32, f32, f32, f32)>>,
     dpi: Cell<f32>,
@@ -3166,6 +3241,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                     org_y - dip_to_pixels(client_y, dpi),
                 );
                 self.grid_view.set_offset(base_x + dx, base_y + dy);
+                self.sprite_atlas_border_view
+                    .set_view_offset(base_x + dx, base_y + dy);
                 self.selected_sprite_marker_view
                     .set_view_offset(base_x + dx, base_y + dy);
 
@@ -3192,6 +3269,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                     org_y - dip_to_pixels(client_y, dpi),
                 );
                 self.grid_view.set_offset(base_x + dx, base_y + dy);
+                self.sprite_atlas_border_view
+                    .set_view_offset(base_x + dx, base_y + dy);
                 self.selected_sprite_marker_view
                     .set_view_offset(base_x + dx, base_y + dy);
             }
@@ -3217,6 +3296,7 @@ struct AppWindowPresenter {
     root: ContainerVisual,
     ht_root: HitTestTreeRef,
     grid_view: Arc<AtlasBaseGridView>,
+    sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     sprite_list_pane: SpriteListPanePresenter,
     header_view: AppHeaderView,
@@ -3263,6 +3343,8 @@ impl AppWindowPresenter {
             init_client_size_pixels.height,
         );
 
+        let sprite_atlas_border_view = Rc::new(SpriteAtlasBorderView::new(&mut init.for_view));
+
         let selected_sprite_marker_view =
             Rc::new(CurrentSelectedSpriteMarkerView::new(&mut init.for_view));
 
@@ -3278,6 +3360,7 @@ impl AppWindowPresenter {
 
         root.Children().unwrap().InsertAtBottom(&bg).unwrap();
         grid_view.mount(&root.Children().unwrap());
+        sprite_atlas_border_view.mount(&root.Children().unwrap());
         selected_sprite_marker_view.mount(&root.Children().unwrap());
         sprite_list_pane.mount(
             &root.Children().unwrap(),
@@ -3289,6 +3372,7 @@ impl AppWindowPresenter {
 
         let ht_action_handler = Rc::new(AppWindowHitTestTreeActionHandler {
             grid_view: grid_view.clone(),
+            sprite_atlas_border_view: sprite_atlas_border_view.clone(),
             selected_sprite_marker_view: selected_sprite_marker_view.clone(),
             drag_data: Cell::new(None),
             dpi: Cell::new(init.for_view.dpi),
@@ -3338,11 +3422,26 @@ impl AppWindowPresenter {
                 }
             }
         });
+        init.app_state
+            .borrow_mut()
+            .register_atlas_size_view_feedback({
+                let border_view = Rc::downgrade(&sprite_atlas_border_view);
+
+                move |size| {
+                    let Some(border_view) = border_view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+
+                    border_view.set_size(*size);
+                }
+            });
 
         Self {
             root,
             ht_root,
             grid_view,
+            sprite_atlas_border_view,
             selected_sprite_marker_view,
             sprite_list_pane,
             header_view,

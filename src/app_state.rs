@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::coordinate::SizePixels;
+
 #[derive(Debug)]
 pub struct SpriteInfo {
     pub name: String,
@@ -16,23 +18,41 @@ pub struct SpriteInfo {
 }
 
 pub struct AppState {
-    pub atlas_width: u32,
-    pub atlas_height: u32,
+    atlas_size: SizePixels,
+    atlas_size_view_feedbacks: Vec<Box<dyn FnMut(&SizePixels)>>,
     sprites: Vec<SpriteInfo>,
     sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
 }
 impl AppState {
     pub fn new() -> Self {
         Self {
-            atlas_width: 32,
-            atlas_height: 32,
+            atlas_size: SizePixels {
+                width: 32,
+                height: 32,
+            },
+            atlas_size_view_feedbacks: Vec::new(),
             sprites: Vec::new(),
             sprites_view_feedbacks: Vec::new(),
         }
     }
 
     pub fn add_sprites(&mut self, sprites: impl IntoIterator<Item = SpriteInfo>) {
-        self.sprites.extend(sprites);
+        let mut iter = sprites.into_iter();
+        self.sprites.reserve(iter.size_hint().0);
+        let mut max_required_size = self.atlas_size;
+        while let Some(n) = iter.next() {
+            max_required_size.width = max_required_size.width.max(n.left + n.width);
+            max_required_size.height = max_required_size.height.max(n.top + n.height);
+
+            self.sprites.push(n);
+        }
+
+        if max_required_size != self.atlas_size {
+            self.atlas_size = max_required_size;
+            for cb in self.atlas_size_view_feedbacks.iter_mut() {
+                cb(&self.atlas_size);
+            }
+        }
 
         for cb in self.sprites_view_feedbacks.iter_mut() {
             cb(&self.sprites);
@@ -50,8 +70,14 @@ impl AppState {
     }
 
     // TODO: unregister
-    pub fn register_sprites_view_feedback(&mut self, fb: impl FnMut(&[SpriteInfo]) + 'static) {
-        let boxed = Box::new(fb);
-        self.sprites_view_feedbacks.push(boxed);
+    pub fn register_sprites_view_feedback(&mut self, mut fb: impl FnMut(&[SpriteInfo]) + 'static) {
+        fb(&self.sprites);
+        self.sprites_view_feedbacks.push(Box::new(fb));
+    }
+
+    // TODO: unregister
+    pub fn register_atlas_size_view_feedback(&mut self, mut fb: impl FnMut(&SizePixels) + 'static) {
+        fb(&self.atlas_size);
+        self.atlas_size_view_feedbacks.push(Box::new(fb));
     }
 }
