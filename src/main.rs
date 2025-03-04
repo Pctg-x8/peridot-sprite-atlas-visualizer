@@ -3259,33 +3259,6 @@ pub struct QuadTree {
     pub element_index_for_region: Vec<Vec<HashSet<usize>>>,
 }
 impl QuadTree {
-    const fn compute_location_index(location_x_pixels: u32, location_y_pixels: u32) -> u64 {
-        // 一旦一律16px(2^4)角まで分割する
-        let (xv, yv) = (
-            (location_x_pixels >> 4) as u64,
-            (location_y_pixels >> 4) as u64,
-        );
-
-        // のちのシフト操作で情報が欠けないように検査いれる
-        assert!(xv.leading_zeros() >= 32, "too many divisions!");
-        assert!(yv.leading_zeros() >= 32, "too many divisions!");
-
-        let xv = (xv | (xv << 32)) & 0xffff_ffff_ffff_ffff;
-        let xv = (xv | (xv << 16)) & 0x0000_ffff_0000_ffff;
-        let xv = (xv | (xv << 8)) & 0x00ff_00ff_00ff_00ff;
-        let xv = (xv | (xv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        let xv = (xv | (xv << 2)) & 0x3333_3333_3333_3333;
-        let xv = (xv | (xv << 1)) & 0x5555_5555_5555_5555;
-        let yv = (yv | (yv << 32)) & 0xffff_ffff_ffff_ffff;
-        let yv = (yv | (yv << 16)) & 0x0000_ffff_0000_ffff;
-        let yv = (yv | (yv << 8)) & 0x00ff_00ff_00ff_00ff;
-        let yv = (yv | (yv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        let yv = (yv | (yv << 2)) & 0x3333_3333_3333_3333;
-        let yv = (yv | (yv << 1)) & 0x5555_5555_5555_5555;
-
-        xv | (yv << 1)
-    }
-
     pub fn new() -> Self {
         Self {
             element_index_for_region: Vec::new(),
@@ -3317,19 +3290,50 @@ impl QuadTree {
         }
     }
 
-    const fn rect_index_and_level(left: u32, top: u32, right: u32, bottom: u32) -> (u64, usize) {
+    pub const fn compute_location_index(location_x_pixels: u32, location_y_pixels: u32) -> u64 {
+        // 一旦一律16(2^4)px角まで分割する
+        let (xv, yv) = (
+            (location_x_pixels >> 4) as u64,
+            (location_y_pixels >> 4) as u64,
+        );
+
+        // のちのシフト操作で情報が欠けないように検査いれる
+        assert!(xv.leading_zeros() >= 32, "too many divisions!");
+        assert!(yv.leading_zeros() >= 32, "too many divisions!");
+
+        let xv = (xv | (xv << 32)) & 0xffff_ffff_ffff_ffff;
+        let xv = (xv | (xv << 16)) & 0x0000_ffff_0000_ffff;
+        let xv = (xv | (xv << 8)) & 0x00ff_00ff_00ff_00ff;
+        let xv = (xv | (xv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+        let xv = (xv | (xv << 2)) & 0x3333_3333_3333_3333;
+        let xv = (xv | (xv << 1)) & 0x5555_5555_5555_5555;
+        let yv = (yv | (yv << 32)) & 0xffff_ffff_ffff_ffff;
+        let yv = (yv | (yv << 16)) & 0x0000_ffff_0000_ffff;
+        let yv = (yv | (yv << 8)) & 0x00ff_00ff_00ff_00ff;
+        let yv = (yv | (yv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+        let yv = (yv | (yv << 2)) & 0x3333_3333_3333_3333;
+        let yv = (yv | (yv << 1)) & 0x5555_5555_5555_5555;
+
+        xv | (yv << 1)
+    }
+
+    pub const fn rect_index_and_level(
+        left: u32,
+        top: u32,
+        right: u32,
+        bottom: u32,
+    ) -> (u64, usize) {
         let lt_location = Self::compute_location_index(left, top);
         let rb_location = Self::compute_location_index(right, bottom);
         // xorをとるとズレているレベルの2bitが00にならないので、それでどの分割レベルで跨いでいないか（どのレベルの所属インデックスまでが一致しているか）を判定できるっぽい
         let xor = lt_location ^ rb_location;
-        let leading_zeros = xor.leading_zeros();
 
         // 先頭の0のビット数を数えて、
         // 0, 1...Lv0(root, 分割無し)
         // 2, 3...Lv1(全体を4分割したうちのどこか)
         // 4, 5...Lv2(全体を16分割したうちのどこか)
         // ...となるように計算する
-        let level = (leading_zeros / 2) as usize;
+        let level = (xor.leading_zeros() / 2) as usize;
         // 符号なし整数なので右シフト後は上が0で埋まるはず
         let index = lt_location >> (64 - level * 2);
 
@@ -3625,37 +3629,42 @@ impl AppWindowPresenter {
                     .enumerate()
                 {
                     // 移動分
-                    if old.0 != new.left
-                        || old.1 != new.top
-                        || old.2 != new.left + new.width
-                        || old.3 != new.top + new.height
+                    if old.0 == new.left
+                        && old.1 == new.top
+                        && old.2 == new.left + new.width
+                        && old.3 == new.top + new.height
                     {
-                        let (old_index, old_level) =
-                            QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
-                        let (new_index, new_level) = QuadTree::rect_index_and_level(
-                            new.left,
-                            new.top,
-                            new.left + new.width,
-                            new.top + new.height,
-                        );
-                        if old_level != new_level || old_index != new_index {
-                            // replace
-                            ht_action_handler.qt.borrow_mut().element_index_for_region[old_level]
-                                [old_index as usize]
-                                .remove(&n);
-                            ht_action_handler
-                                .qt
-                                .borrow_mut()
-                                .bind(new_level, new_index, n);
-
-                            *old = (
-                                new.left,
-                                new.top,
-                                new.left + new.width,
-                                new.top + new.height,
-                            );
-                        }
+                        // 座標変化なし
+                        continue;
                     }
+
+                    let (old_index, old_level) =
+                        QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+                    let (new_index, new_level) = QuadTree::rect_index_and_level(
+                        new.left,
+                        new.top,
+                        new.left + new.width,
+                        new.top + new.height,
+                    );
+                    *old = (
+                        new.left,
+                        new.top,
+                        new.left + new.width,
+                        new.top + new.height,
+                    );
+
+                    if old_level == new_level && old_index == new_index {
+                        // 所属ブロックに変化なし
+                        continue;
+                    }
+
+                    ht_action_handler.qt.borrow_mut().element_index_for_region[old_level]
+                        [old_index as usize]
+                        .remove(&n);
+                    ht_action_handler
+                        .qt
+                        .borrow_mut()
+                        .bind(new_level, new_index, n);
                 }
                 let new_base = ht_action_handler.sprite_rect_cached.borrow().len();
                 for (n, new) in sprites.iter().enumerate().skip(new_base) {
