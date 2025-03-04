@@ -1,7 +1,7 @@
 use core::mem::MaybeUninit;
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     os::windows::ffi::OsStringExt,
     path::PathBuf,
@@ -1227,6 +1227,7 @@ pub struct CurrentSelectedSpriteMarkerView {
     root: SpriteVisual,
     composition_properties: CompositionPropertySet,
     focus_animation: CompositionAnimationGroup,
+    hide_animation: ScalarKeyFrameAnimation,
 }
 impl CurrentSelectedSpriteMarkerView {
     const CORNER_RADIUS: f32 = 4.0;
@@ -1370,10 +1371,25 @@ impl CurrentSelectedSpriteMarkerView {
         root.StartAnimation(h!("Offset"), &root_offset_expr)
             .unwrap();
 
+        let hide_animation = SimpleScalarAnimationParams::new(
+            1.0,
+            0.0,
+            &init
+                .subsystem
+                .compositor
+                .CreateLinearEasingFunction()
+                .unwrap(),
+        )
+        .target(h!("Opacity"))
+        .duration(timespan_ms(150))
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
         Self {
             root,
             composition_properties,
             focus_animation,
+            hide_animation,
         }
     }
 
@@ -1407,6 +1423,13 @@ impl CurrentSelectedSpriteMarkerView {
             .unwrap();
         self.root
             .StartAnimationGroup(&self.focus_animation)
+            .unwrap();
+    }
+
+    pub fn hide(&self) {
+        self.root.StopAnimationGroup(&self.focus_animation).unwrap();
+        self.root
+            .StartAnimation(h!("Opacity"), &self.hide_animation)
             .unwrap();
     }
 
@@ -1518,10 +1541,7 @@ impl SpriteListToggleButtonView {
 
         let icon_surface = init
             .subsystem
-            .new_2d_drawing_surface(Size {
-                Width: icon_size_px,
-                Height: icon_size_px,
-            })
+            .new_2d_drawing_surface(size_sq(icon_size_px))
             .unwrap();
         draw_2d(&icon_surface, |dc, offset| {
             unsafe {
@@ -3188,10 +3208,141 @@ impl FileDragAndDropOverlayView {
     }
 }
 
+pub struct QuadTreeElementIndexIter<'a> {
+    qt: &'a QuadTree,
+    index: u64,
+    current_level: usize,
+    current_internal_iter: Option<std::collections::hash_set::Iter<'a, usize>>,
+}
+impl Iterator for QuadTreeElementIndexIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if let Some(a) = self.current_internal_iter.as_mut() {
+            if let Some(&x) = a.next() {
+                return Some(x);
+            }
+
+            // 全部回りきった
+            self.current_internal_iter = None;
+            self.current_level += 1;
+        }
+
+        // 下層の要素を探す
+        while self.current_level < 32 {
+            let index = if self.current_level == 0 {
+                0
+            } else {
+                self.index >> (64 - self.current_level * 2)
+            };
+            let elements = &self
+                .qt
+                .element_index_for_region
+                .get(self.current_level)
+                .and_then(|xs| xs.get(index as usize));
+            if let Some(elements) = elements.filter(|x| !x.is_empty()) {
+                // この層には要素がある
+                self.current_internal_iter = Some(elements.iter());
+                return self.next();
+            }
+
+            self.current_level += 1;
+        }
+
+        // もうない
+        None
+    }
+}
+
+// http://marupeke296.com/COL_2D_No8_QuadTree.html だいたいこれの実装
+pub struct QuadTree {
+    pub element_index_for_region: Vec<Vec<HashSet<usize>>>,
+}
+impl QuadTree {
+    const fn compute_location_index(location_x_pixels: u32, location_y_pixels: u32) -> u64 {
+        // 一旦一律16px(2^4)角まで分割する
+        let (xv, yv) = (
+            (location_x_pixels >> 4) as u64,
+            (location_y_pixels >> 4) as u64,
+        );
+
+        // のちのシフト操作で情報が欠けないように検査いれる
+        assert!(xv.leading_zeros() >= 32, "too many divisions!");
+        assert!(yv.leading_zeros() >= 32, "too many divisions!");
+
+        let xv = (xv | (xv << 32)) & 0xffff_ffff_ffff_ffff;
+        let xv = (xv | (xv << 16)) & 0x0000_ffff_0000_ffff;
+        let xv = (xv | (xv << 8)) & 0x00ff_00ff_00ff_00ff;
+        let xv = (xv | (xv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+        let xv = (xv | (xv << 2)) & 0x3333_3333_3333_3333;
+        let xv = (xv | (xv << 1)) & 0x5555_5555_5555_5555;
+        let yv = (yv | (yv << 32)) & 0xffff_ffff_ffff_ffff;
+        let yv = (yv | (yv << 16)) & 0x0000_ffff_0000_ffff;
+        let yv = (yv | (yv << 8)) & 0x00ff_00ff_00ff_00ff;
+        let yv = (yv | (yv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+        let yv = (yv | (yv << 2)) & 0x3333_3333_3333_3333;
+        let yv = (yv | (yv << 1)) & 0x5555_5555_5555_5555;
+
+        xv | (yv << 1)
+    }
+
+    pub fn new() -> Self {
+        Self {
+            element_index_for_region: Vec::new(),
+        }
+    }
+
+    pub fn bind(&mut self, level: usize, index: u64, n: usize) {
+        while self.element_index_for_region.len() <= level {
+            self.element_index_for_region.push(Vec::new());
+        }
+
+        while self.element_index_for_region[level].len() <= index as _ {
+            self.element_index_for_region[level].push(HashSet::new());
+        }
+
+        self.element_index_for_region[level][index as usize].insert(n);
+    }
+
+    pub const fn iter_possible_element_indices(
+        &self,
+        x_pixels: u32,
+        y_pixels: u32,
+    ) -> impl Iterator<Item = usize> {
+        QuadTreeElementIndexIter {
+            qt: self,
+            index: Self::compute_location_index(x_pixels, y_pixels),
+            current_level: 0,
+            current_internal_iter: None,
+        }
+    }
+
+    const fn rect_index_and_level(left: u32, top: u32, right: u32, bottom: u32) -> (u64, usize) {
+        let lt_location = Self::compute_location_index(left, top);
+        let rb_location = Self::compute_location_index(right, bottom);
+        // xorをとるとズレているレベルの2bitが00にならないので、それでどの分割レベルで跨いでいないか（どのレベルの所属インデックスまでが一致しているか）を判定できるっぽい
+        let xor = lt_location ^ rb_location;
+        let leading_zeros = xor.leading_zeros();
+
+        // 先頭の0のビット数を数えて、
+        // 0, 1...Lv0(root, 分割無し)
+        // 2, 3...Lv1(全体を4分割したうちのどこか)
+        // 4, 5...Lv2(全体を16分割したうちのどこか)
+        // ...となるように計算する
+        let level = (leading_zeros / 2) as usize;
+        // 符号なし整数なので右シフト後は上が0で埋まるはず
+        let index = lt_location >> (64 - level * 2);
+
+        (index, level)
+    }
+}
+
 struct AppWindowHitTestTreeActionHandler {
     grid_view: Arc<AtlasBaseGridView>,
     sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
+    qt: RefCell<QuadTree>,
+    sprite_rect_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
     drag_data: Cell<Option<(f32, f32, f32, f32)>>,
     dpi: Cell<f32>,
     ht_root: HitTestTreeRef,
@@ -3277,6 +3428,46 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
 
             return EventContinueControl::STOP_PROPAGATION
                 | EventContinueControl::RELEASE_CAPTURE_ELEMENT;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_click(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        client_x: f32,
+        client_y: f32,
+        _client_width: f32,
+        _client_height: f32,
+    ) -> EventContinueControl {
+        if sender == self.ht_root {
+            let dpi = self.dpi.get();
+            let x = dip_to_pixels(client_x, dpi) + self.grid_view.offset_pixels.read().0;
+            let y = dip_to_pixels(client_y, dpi) + self.grid_view.offset_pixels.read().1;
+
+            let mut max_index = None;
+            for n in self
+                .qt
+                .borrow()
+                .iter_possible_element_indices(x as _, y as _)
+            {
+                let (left, top, right, bottom) = self.sprite_rect_cached.borrow()[n];
+                if left as f32 <= x && x <= right as f32 && top as f32 <= y && y <= bottom as f32 {
+                    // 大きいインデックスのものが最前面にいるのでmaxをとる
+                    max_index = Some(max_index.map_or(n, |x: usize| x.max(n)));
+                }
+            }
+
+            if let Some(mx) = max_index {
+                context.select_sprite(mx);
+            } else {
+                context.deselect_sprite();
+            }
+
+            return EventContinueControl::STOP_PROPAGATION;
         }
 
         EventContinueControl::empty()
@@ -3374,6 +3565,8 @@ impl AppWindowPresenter {
             grid_view: grid_view.clone(),
             sprite_atlas_border_view: sprite_atlas_border_view.clone(),
             selected_sprite_marker_view: selected_sprite_marker_view.clone(),
+            qt: RefCell::new(QuadTree::new()),
+            sprite_rect_cached: RefCell::new(Vec::new()),
             drag_data: Cell::new(None),
             dpi: Cell::new(init.for_view.dpi),
             ht_root,
@@ -3393,6 +3586,7 @@ impl AppWindowPresenter {
             let grid_view = Arc::downgrade(&grid_view);
             let selected_sprite_marker_view = Rc::downgrade(&selected_sprite_marker_view);
             let mut last_selected_index = None;
+            let ht_action_handler = Rc::downgrade(&ht_action_handler);
 
             move |sprites| {
                 let Some(grid_view) = grid_view.upgrade() else {
@@ -3404,6 +3598,82 @@ impl AppWindowPresenter {
                     // parent teardown-ed
                     return;
                 };
+                let Some(ht_action_handler) = ht_action_handler.upgrade() else {
+                    // parent teardown-ed
+                    return;
+                };
+
+                while ht_action_handler.sprite_rect_cached.borrow().len() > sprites.len() {
+                    // 削除分
+                    let n = ht_action_handler.sprite_rect_cached.borrow().len() - 1;
+                    let old = ht_action_handler
+                        .sprite_rect_cached
+                        .borrow_mut()
+                        .pop()
+                        .unwrap();
+                    let (index, level) = QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+
+                    ht_action_handler.qt.borrow_mut().element_index_for_region[level]
+                        [index as usize]
+                        .remove(&n);
+                }
+                for (n, (old, new)) in ht_action_handler
+                    .sprite_rect_cached
+                    .borrow_mut()
+                    .iter_mut()
+                    .zip(sprites.iter())
+                    .enumerate()
+                {
+                    // 移動分
+                    if old.0 != new.left
+                        || old.1 != new.top
+                        || old.2 != new.left + new.width
+                        || old.3 != new.top + new.height
+                    {
+                        let (old_index, old_level) =
+                            QuadTree::rect_index_and_level(old.0, old.1, old.2, old.3);
+                        let (new_index, new_level) = QuadTree::rect_index_and_level(
+                            new.left,
+                            new.top,
+                            new.left + new.width,
+                            new.top + new.height,
+                        );
+                        if old_level != new_level || old_index != new_index {
+                            // replace
+                            ht_action_handler.qt.borrow_mut().element_index_for_region[old_level]
+                                [old_index as usize]
+                                .remove(&n);
+                            ht_action_handler
+                                .qt
+                                .borrow_mut()
+                                .bind(new_level, new_index, n);
+
+                            *old = (
+                                new.left,
+                                new.top,
+                                new.left + new.width,
+                                new.top + new.height,
+                            );
+                        }
+                    }
+                }
+                let new_base = ht_action_handler.sprite_rect_cached.borrow().len();
+                for (n, new) in sprites.iter().enumerate().skip(new_base) {
+                    // 追加分
+                    let (index, level) = QuadTree::rect_index_and_level(
+                        new.left,
+                        new.top,
+                        new.left + new.width,
+                        new.top + new.height,
+                    );
+                    ht_action_handler.qt.borrow_mut().bind(level, index, n);
+                    ht_action_handler.sprite_rect_cached.borrow_mut().push((
+                        new.left,
+                        new.top,
+                        new.left + new.width,
+                        new.top + new.height,
+                    ));
+                }
 
                 grid_view.update_sprites(sprites);
 
@@ -3418,6 +3688,8 @@ impl AppWindowPresenter {
                             sprites[x].width as _,
                             sprites[x].height as _,
                         );
+                    } else {
+                        selected_sprite_marker_view.hide();
                     }
                 }
             }

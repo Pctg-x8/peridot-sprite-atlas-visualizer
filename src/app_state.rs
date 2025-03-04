@@ -41,8 +41,15 @@ impl AppState {
         self.sprites.reserve(iter.size_hint().0);
         let mut max_required_size = self.atlas_size;
         while let Some(n) = iter.next() {
-            max_required_size.width = max_required_size.width.max(n.left + n.width);
-            max_required_size.height = max_required_size.height.max(n.top + n.height);
+            // Power of Twoに丸める（そうするとUV計算が正確になるため）
+            max_required_size.width = max_required_size
+                .width
+                .max(n.left + n.width)
+                .next_power_of_two();
+            max_required_size.height = max_required_size
+                .height
+                .max(n.top + n.height)
+                .next_power_of_two();
 
             self.sprites.push(n);
         }
@@ -62,6 +69,16 @@ impl AppState {
     pub fn select_sprite(&mut self, index: usize) {
         for (n, x) in self.sprites.iter_mut().enumerate() {
             x.selected = n == index;
+        }
+
+        for cb in self.sprites_view_feedbacks.iter_mut() {
+            cb(&self.sprites);
+        }
+    }
+
+    pub fn deselect_sprite(&mut self) {
+        for x in self.sprites.iter_mut() {
+            x.selected = false;
         }
 
         for cb in self.sprites_view_feedbacks.iter_mut() {
