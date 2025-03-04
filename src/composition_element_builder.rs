@@ -4,10 +4,10 @@ use windows::{
         CompositionBrush, CompositionColorGradientStop, CompositionEasingFunction,
         CompositionLinearGradientBrush, CompositionMaskBrush, CompositionNineGridBrush,
         CompositionStretch, CompositionSurfaceBrush, Compositor, ContainerVisual,
-        ICompositionSurface, ScalarKeyFrameAnimation, SpriteVisual,
+        ICompositionSurface, ScalarKeyFrameAnimation, SpriteVisual, Vector3KeyFrameAnimation,
     },
 };
-use windows_core::HSTRING;
+use windows_core::{HSTRING, h};
 use windows_numerics::{Vector2, Vector3};
 
 pub struct CompositionColorGradientStopParams {
@@ -429,6 +429,53 @@ where
         if let Some(p) = self.target {
             x.SetTarget(p)?;
         }
+
+        Ok(x)
+    }
+}
+
+pub struct SimpleImplicitAnimationParams<'s, Easing> {
+    easing: Easing,
+    target: &'s HSTRING,
+    duration: TimeSpan,
+}
+impl<'s, Easing> SimpleImplicitAnimationParams<'s, Easing> {
+    pub const fn new(easing: Easing, target: &'s HSTRING, duration: TimeSpan) -> Self {
+        Self {
+            easing,
+            target,
+            duration,
+        }
+    }
+}
+impl<'s, Easing> SimpleImplicitAnimationParams<'s, Easing>
+where
+    Easing: windows_core::Param<CompositionEasingFunction>,
+{
+    #[inline]
+    pub fn instantiate_scalar(
+        self,
+        compositor: &Compositor,
+    ) -> windows_core::Result<ScalarKeyFrameAnimation> {
+        let x = compositor.CreateScalarKeyFrameAnimation()?;
+        x.InsertExpressionKeyFrame(0.0, h!("this.StartingValue"))?;
+        x.InsertExpressionKeyFrameWithEasingFunction(1.0, h!("this.FinalValue"), self.easing)?;
+        x.SetTarget(self.target)?;
+        x.SetDuration(self.duration)?;
+
+        Ok(x)
+    }
+
+    #[inline]
+    pub fn instantiate_vector3(
+        self,
+        compositor: &Compositor,
+    ) -> windows_core::Result<Vector3KeyFrameAnimation> {
+        let x = compositor.CreateVector3KeyFrameAnimation()?;
+        x.InsertExpressionKeyFrame(0.0, h!("this.StartingValue"))?;
+        x.InsertExpressionKeyFrameWithEasingFunction(1.0, h!("this.FinalValue"), self.easing)?;
+        x.SetTarget(self.target)?;
+        x.SetDuration(self.duration)?;
 
         Ok(x)
     }

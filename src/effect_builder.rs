@@ -11,6 +11,29 @@ pub struct GaussianBlurEffectParams<'s, Source> {
     pub blur_amount: Option<f32>,
     pub name: Option<&'s HSTRING>,
 }
+impl<'s, Source> GaussianBlurEffectParams<'s, Source> {
+    pub const fn new(source: Source) -> Self {
+        Self {
+            source,
+            blur_amount: None,
+            name: None,
+        }
+    }
+
+    pub const fn blur_amount(mut self, amount: f32) -> Self {
+        self.blur_amount = Some(amount);
+        self
+    }
+
+    pub const fn blur_amount_px(self, amount_px: f32) -> Self {
+        self.blur_amount(amount_px / 3.0)
+    }
+
+    pub const fn name(mut self, name: &'s HSTRING) -> Self {
+        self.name = Some(name);
+        self
+    }
+}
 impl<'s, Source> GaussianBlurEffectParams<'s, Source>
 where
     Source: windows_core::Param<IGraphicsEffectSource>,
@@ -48,6 +71,19 @@ impl ColorSourceEffectParams {
 pub struct CompositeEffectParams<'a> {
     pub sources: &'a [IGraphicsEffectSource],
     pub mode: Option<CanvasComposite>,
+}
+impl<'a> CompositeEffectParams<'a> {
+    pub const fn new(sources: &'a [IGraphicsEffectSource]) -> Self {
+        Self {
+            sources,
+            mode: None,
+        }
+    }
+
+    pub const fn mode(mut self, mode: CanvasComposite) -> Self {
+        self.mode = Some(mode);
+        self
+    }
 }
 impl CompositeEffectParams<'_> {
     #[inline]

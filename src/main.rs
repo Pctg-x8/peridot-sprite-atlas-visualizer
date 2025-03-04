@@ -6,26 +6,27 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::PathBuf,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread::JoinHandle,
+    sync::Arc,
 };
 
 use app_state::{AppState, SpriteInfo};
+use bg_worker::{
+    BackgroundWork, BackgroundWorker, BackgroundWorkerEnqueueAccess,
+    BackgroundWorkerEnqueueWeakAccess, BackgroundWorkerViewFeedback,
+};
 use component::app_header::AppHeaderView;
 use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
-    ContainerVisualParams, SimpleScalarAnimationParams, SpriteVisualParams,
+    ContainerVisualParams, SimpleImplicitAnimationParams, SimpleScalarAnimationParams,
+    SpriteVisualParams,
 };
-use crossbeam::deque::{Injector, Worker};
 use effect_builder::{
     ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams, TintEffectParams,
 };
 use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
 use image::EncodableLayout;
+use native_wrapper::NativeEvent;
 use subsystem::Subsystem;
 use windows::{
     Foundation::{Size, TimeSpan},
@@ -41,9 +42,7 @@ use windows::{
         },
     },
     Win32::{
-        Foundation::{
-            CloseHandle, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
-        },
+        Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
         Graphics::{
             Direct2D::{
                 Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F},
@@ -96,7 +95,7 @@ use windows::{
                 CF_HDROP, DROPEFFECT_LINK, IDropTarget, IDropTarget_Impl, OleInitialize,
                 RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
             },
-            Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent},
+            Threading::INFINITE,
             WinRT::{
                 Composition::ICompositionDrawingSurfaceInterop, CreateDispatcherQueueController,
                 DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
@@ -126,12 +125,14 @@ use windows_core::{BOOL, HSTRING, implement};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 mod app_state;
+mod bg_worker;
 mod component;
 mod composition_element_builder;
 mod effect_builder;
 mod extra_bindings;
 mod hittest;
 mod input;
+mod native_wrapper;
 mod source_reader;
 mod subsystem;
 
@@ -289,6 +290,28 @@ const fn d2d1_color_f_from_rgb_hex(hex: u32) -> D2D1_COLOR_F {
 
 const BG_COLOR: Color = rgb_color_from_hex(0x202030);
 
+#[inline]
+fn draw_2d<T, E>(
+    surface: &CompositionDrawingSurface,
+    renderer: impl FnOnce(&ID2D1DeviceContext, &POINT) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<windows_core::Error>,
+{
+    let surface_interop: ICompositionDrawingSurfaceInterop = surface
+        .cast()
+        .expect("this surface does not support rendering with Direct2D");
+    let mut offset = MaybeUninit::uninit();
+    let dc: ID2D1DeviceContext = unsafe { surface_interop.BeginDraw(None, offset.as_mut_ptr())? };
+    let r = renderer(&dc, unsafe { offset.assume_init_ref() });
+    // Note: rendererがエラーでもEndDrawは必ずする
+    unsafe {
+        surface_interop.EndDraw()?;
+    }
+
+    r
+}
+
 pub trait DpiHandler {
     #[allow(unused_variables)]
     fn on_dpi_changed(&self, new_dpi: f32) {}
@@ -316,181 +339,6 @@ impl ViewInitContext<'_> {
     #[inline(always)]
     pub const fn signed_pixels_to_dip(&self, pixels: i32) -> f32 {
         signed_pixels_to_dip(pixels, self.dpi)
-    }
-}
-
-#[repr(transparent)]
-pub struct NativeEvent(HANDLE);
-unsafe impl Sync for NativeEvent {}
-unsafe impl Send for NativeEvent {}
-impl Drop for NativeEvent {
-    #[inline(always)]
-    fn drop(&mut self) {
-        if let Err(e) = unsafe { CloseHandle(self.0) } {
-            tracing::warn!({?e}, "CloseHandle failed");
-        }
-    }
-}
-impl NativeEvent {
-    #[inline(always)]
-    pub fn new(
-        manual_reset: bool,
-        name: impl windows_core::Param<PCWSTR>,
-    ) -> windows_core::Result<Self> {
-        let h = unsafe { CreateEventW(None, manual_reset, false, name)? };
-        Ok(Self(h))
-    }
-
-    #[inline(always)]
-    pub fn signal(&self) {
-        unsafe {
-            SetEvent(self.0).unwrap();
-        }
-    }
-
-    #[inline(always)]
-    pub fn reset(&self) {
-        unsafe {
-            ResetEvent(self.0).unwrap();
-        }
-    }
-}
-
-pub enum BackgroundWork {
-    LoadSpriteSource(PathBuf, Box<dyn FnMut(PathBuf, image::DynamicImage) + Send>),
-}
-
-pub enum BackgroundWorkerViewFeedback {
-    BeginWork(usize, String),
-    EndWork(usize),
-}
-
-#[derive(Clone)]
-pub struct BackgroundWorkerEnqueueAccess(Arc<Injector<BackgroundWork>>);
-impl BackgroundWorkerEnqueueAccess {
-    #[inline]
-    pub fn enqueue(&self, work: BackgroundWork) {
-        self.0.push(work);
-    }
-
-    #[inline]
-    pub fn downgrade(&self) -> BackgroundWorkerEnqueueWeakAccess {
-        BackgroundWorkerEnqueueWeakAccess(Arc::downgrade(&self.0))
-    }
-}
-
-#[derive(Clone)]
-pub struct BackgroundWorkerEnqueueWeakAccess(std::sync::Weak<Injector<BackgroundWork>>);
-impl BackgroundWorkerEnqueueWeakAccess {
-    #[inline]
-    pub fn upgrade(&self) -> Option<BackgroundWorkerEnqueueAccess> {
-        self.0.upgrade().map(BackgroundWorkerEnqueueAccess)
-    }
-}
-
-struct BackgroundWorker {
-    join_handles: Vec<JoinHandle<()>>,
-    work_queue: Arc<Injector<BackgroundWork>>,
-    teardown_signal: Arc<AtomicBool>,
-    view_feedback_receiver: crossbeam::channel::Receiver<BackgroundWorkerViewFeedback>,
-}
-impl BackgroundWorker {
-    pub fn new(ui_thread_wakeup_event: &Arc<NativeEvent>) -> Self {
-        let worker_count = std::thread::available_parallelism()
-            .unwrap_or(unsafe { core::num::NonZero::new_unchecked(4) })
-            .get();
-        let work_queue = Injector::new();
-        let (mut join_handles, mut local_queues, mut stealers) = (
-            Vec::with_capacity(worker_count),
-            Vec::with_capacity(worker_count),
-            Vec::with_capacity(worker_count),
-        );
-        for _ in 0..worker_count {
-            let local_queue = Worker::new_fifo();
-            stealers.push(local_queue.stealer());
-            local_queues.push(local_queue);
-        }
-        let stealers = Arc::new(stealers);
-        let work_queue = Arc::new(work_queue);
-        let teardown_signal = Arc::new(AtomicBool::new(false));
-        let (view_feedback_sender, view_feedback_receiver) = crossbeam::channel::unbounded();
-        for (n, local_queue) in local_queues.into_iter().enumerate() {
-            join_handles.push(
-                std::thread::Builder::new()
-                    .name(format!("Background Worker #{}", n + 1))
-                    .spawn({
-                        let stealers = stealers.clone();
-                        let work_queue = work_queue.clone();
-                        let teardown_signal = teardown_signal.clone();
-                        let view_feedback_sender = view_feedback_sender.clone();
-                        let ui_thread_wakeup_event = ui_thread_wakeup_event.clone();
-
-                        move || {
-                            while !teardown_signal.load(Ordering::Acquire) {
-                                let next = local_queue.pop().or_else(|| {
-                                    core::iter::repeat_with(|| {
-                                        work_queue.steal_batch_and_pop(&local_queue).or_else(|| {
-                                            stealers.iter().map(|x| x.steal()).collect()
-                                        })
-                                    })
-                                    .find(|x| !x.is_retry())
-                                    .and_then(|x| x.success())
-                                });
-
-                                match next {
-                                    Some(BackgroundWork::LoadSpriteSource(path, mut on_complete)) => {
-                                        match view_feedback_sender.send(BackgroundWorkerViewFeedback::BeginWork(n, format!("Loading {}", path.display()))) {
-                                            Ok(()) => (),
-                                            Err(e) => {
-                                                tracing::warn!({?e}, "sending view feedback failed");
-                                            }
-                                        }
-                                        ui_thread_wakeup_event.signal();
-                                        let img = image::open(&path).unwrap();
-                                        on_complete(path, img);
-                                        match view_feedback_sender.send(BackgroundWorkerViewFeedback::EndWork(n)) {
-                                            Ok(()) => (),
-                                            Err(e) => {
-                                                tracing::warn!({?e}, "sending view feedback failed");
-                                            }
-                                        }
-                                        ui_thread_wakeup_event.signal();
-                                    }
-                                    None => {
-                                        // wait for new event
-                                        // TODO: 一旦sleep(1)する（本当はparkとかしてあげたほうがいい）
-                                        std::thread::yield_now();
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .unwrap(),
-            );
-        }
-
-        tracing::info!(
-            { parallelism = worker_count },
-            "BackgroundWorker initialized"
-        );
-
-        Self {
-            join_handles,
-            work_queue,
-            teardown_signal,
-            view_feedback_receiver,
-        }
-    }
-
-    pub fn enqueue_access(&self) -> BackgroundWorkerEnqueueAccess {
-        BackgroundWorkerEnqueueAccess(self.work_queue.clone())
-    }
-
-    pub fn teardown(self) {
-        self.teardown_signal.store(true, Ordering::Release);
-        for x in self.join_handles {
-            x.join().unwrap();
-        }
     }
 }
 
@@ -1480,50 +1328,39 @@ impl CurrentSelectedSpriteMarkerView {
                 Height: init.dip_to_pixels(Self::CORNER_RADIUS * 2.0 + 1.0),
             })
             .unwrap();
-        {
-            let interop: ICompositionDrawingSurfaceInterop = surface.cast().unwrap();
-            let mut offset = MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                    dc.SetTransform(&Matrix3x2::translation(
-                        init.signed_pixels_to_dip(offset.x),
-                        init.signed_pixels_to_dip(offset.y),
-                    ));
-                }
-
-                let brush =
-                    scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&Self::COLOR, None) });
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: Self::THICKNESS * 0.5,
-                                top: Self::THICKNESS * 0.5,
-                                right: Self::CORNER_RADIUS * 2.0 + 1.0 - Self::THICKNESS * 0.5,
-                                bottom: Self::CORNER_RADIUS * 2.0 + 1.0 - Self::THICKNESS * 0.5,
-                            },
-                            radiusX: Self::CORNER_RADIUS,
-                            radiusY: Self::CORNER_RADIUS,
-                        },
-                        &brush,
-                        Self::THICKNESS,
-                        None,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
             }
-            r.unwrap();
-        }
+
+            let brush = unsafe { dc.CreateSolidColorBrush(&Self::COLOR, None)? };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: Self::THICKNESS * 0.5,
+                            top: Self::THICKNESS * 0.5,
+                            right: Self::CORNER_RADIUS * 2.0 + 1.0 - Self::THICKNESS * 0.5,
+                            bottom: Self::CORNER_RADIUS * 2.0 + 1.0 - Self::THICKNESS * 0.5,
+                        },
+                        radiusX: Self::CORNER_RADIUS,
+                        radiusY: Self::CORNER_RADIUS,
+                    },
+                    &brush,
+                    Self::THICKNESS,
+                    None,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         let root = SpriteVisualParams::new(
             &CompositionNineGridBrushParams::new(
@@ -1603,24 +1440,10 @@ impl CurrentSelectedSpriteMarkerView {
 
         let composition_properties = init.subsystem.compositor.CreatePropertySet().unwrap();
         composition_properties
-            .InsertVector3(
-                h!("GlobalPos"),
-                Vector3 {
-                    X: 0.0,
-                    Y: 0.0,
-                    Z: 0.0,
-                },
-            )
+            .InsertVector3(h!("GlobalPos"), Vector3::zero())
             .unwrap();
         composition_properties
-            .InsertVector3(
-                h!("ViewOffset"),
-                Vector3 {
-                    X: 0.0,
-                    Y: 0.0,
-                    Z: 0.0,
-                },
-            )
+            .InsertVector3(h!("ViewOffset"), Vector3::zero())
             .unwrap();
 
         let root_offset_expr = init
@@ -1713,86 +1536,86 @@ impl SpriteListToggleButtonView {
                 Height: icon_size_px,
             })
             .unwrap();
-        {
-            let interop: ICompositionDrawingSurfaceInterop = icon_surface.cast().unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                    dc.SetTransform(&Matrix3x2::translation(
-                        init.signed_pixels_to_dip(offset.x),
-                        init.signed_pixels_to_dip(offset.y),
-                    ));
-                }
-
-                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }, None) });
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawLine(
-                        D2D_POINT_2F {
-                            x: Self::ICON_SIZE * 0.4,
-                            y: 0.0,
-                        },
-                        D2D_POINT_2F {
-                            x: 0.0,
-                            y: Self::ICON_SIZE * 0.5,
-                        },
-                        &brush,
-                        Self::ICON_THICKNESS,
-                        None,
-                    );
-                    dc.DrawLine(
-                        D2D_POINT_2F {
-                            x: 0.0,
-                            y: Self::ICON_SIZE * 0.5,
-                        },
-                        D2D_POINT_2F {
-                            x: Self::ICON_SIZE * 0.4,
-                            y: Self::ICON_SIZE,
-                        },
-                        &brush,
-                        Self::ICON_THICKNESS,
-                        None,
-                    );
-                    dc.DrawLine(
-                        D2D_POINT_2F {
-                            x: Self::ICON_SIZE,
-                            y: 0.0,
-                        },
-                        D2D_POINT_2F {
-                            x: Self::ICON_SIZE * 0.6,
-                            y: Self::ICON_SIZE * 0.5,
-                        },
-                        &brush,
-                        Self::ICON_THICKNESS,
-                        None,
-                    );
-                    dc.DrawLine(
-                        D2D_POINT_2F {
-                            x: Self::ICON_SIZE * 0.6,
-                            y: Self::ICON_SIZE * 0.5,
-                        },
-                        D2D_POINT_2F {
-                            x: Self::ICON_SIZE,
-                            y: Self::ICON_SIZE,
-                        },
-                        &brush,
-                        Self::ICON_THICKNESS,
-                        None,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&icon_surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
             }
-            r.unwrap();
-        }
+
+            let brush = unsafe {
+                dc.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.9,
+                        g: 0.9,
+                        b: 0.9,
+                        a: 1.0,
+                    },
+                    None,
+                )?
+            };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawLine(
+                    D2D_POINT_2F {
+                        x: Self::ICON_SIZE * 0.4,
+                        y: 0.0,
+                    },
+                    D2D_POINT_2F {
+                        x: 0.0,
+                        y: Self::ICON_SIZE * 0.5,
+                    },
+                    &brush,
+                    Self::ICON_THICKNESS,
+                    None,
+                );
+                dc.DrawLine(
+                    D2D_POINT_2F {
+                        x: 0.0,
+                        y: Self::ICON_SIZE * 0.5,
+                    },
+                    D2D_POINT_2F {
+                        x: Self::ICON_SIZE * 0.4,
+                        y: Self::ICON_SIZE,
+                    },
+                    &brush,
+                    Self::ICON_THICKNESS,
+                    None,
+                );
+                dc.DrawLine(
+                    D2D_POINT_2F {
+                        x: Self::ICON_SIZE,
+                        y: 0.0,
+                    },
+                    D2D_POINT_2F {
+                        x: Self::ICON_SIZE * 0.6,
+                        y: Self::ICON_SIZE * 0.5,
+                    },
+                    &brush,
+                    Self::ICON_THICKNESS,
+                    None,
+                );
+                dc.DrawLine(
+                    D2D_POINT_2F {
+                        x: Self::ICON_SIZE * 0.6,
+                        y: Self::ICON_SIZE * 0.5,
+                    },
+                    D2D_POINT_2F {
+                        x: Self::ICON_SIZE,
+                        y: Self::ICON_SIZE,
+                    },
+                    &brush,
+                    Self::ICON_THICKNESS,
+                    None,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         let frame_surface = init
             .subsystem
@@ -1801,45 +1624,45 @@ impl SpriteListToggleButtonView {
                 Height: button_size_px,
             })
             .unwrap();
-        {
-            let interop: ICompositionDrawingSurfaceInterop = frame_surface.cast().unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                    dc.SetTransform(&Matrix3x2::translation(
-                        init.signed_pixels_to_dip(offset.x),
-                        init.signed_pixels_to_dip(offset.y),
-                    ));
-                }
-
-                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None) });
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: D2D_POINT_2F {
-                                x: Self::BUTTON_SIZE * 0.5,
-                                y: Self::BUTTON_SIZE * 0.5,
-                            },
-                            radiusX: Self::BUTTON_SIZE * 0.5,
-                            radiusY: Self::BUTTON_SIZE * 0.5,
-                        },
-                        &brush,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&frame_surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
             }
-            r.unwrap();
-        }
+
+            let brush = unsafe {
+                dc.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    None,
+                )?
+            };
+
+            unsafe {
+                dc.Clear(None);
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: D2D_POINT_2F {
+                            x: Self::BUTTON_SIZE * 0.5,
+                            y: Self::BUTTON_SIZE * 0.5,
+                        },
+                        radiusX: Self::BUTTON_SIZE * 0.5,
+                        radiusY: Self::BUTTON_SIZE * 0.5,
+                    },
+                    &brush,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         let root = ContainerVisualParams::new()
             .size_sq(button_size_px)
@@ -1874,58 +1697,34 @@ impl SpriteListToggleButtonView {
         children.InsertAtTop(&bg).unwrap();
         children.InsertAtTop(&icon).unwrap();
 
-        let implicit_easing_animation = init
-            .subsystem
-            .compositor
-            .CreateScalarKeyFrameAnimation()
-            .unwrap();
-        implicit_easing_animation
-            .InsertExpressionKeyFrame(0.0, h!("this.StartingValue"))
-            .unwrap();
-        implicit_easing_animation
-            .InsertExpressionKeyFrameWithEasingFunction(
-                1.0,
-                h!("this.FinalValue"),
-                &init
-                    .subsystem
-                    .compositor
-                    .CreateCubicBezierEasingFunction(
-                        Vector2 { X: 0.5, Y: 0.0 },
-                        Vector2 { X: 0.5, Y: 1.0 },
-                    )
-                    .unwrap(),
-            )
-            .unwrap();
-        implicit_easing_animation.SetTarget(h!("Opacity")).unwrap();
-        implicit_easing_animation
-            .SetDuration(timespan_ms(100))
-            .unwrap();
-        let implicit_move_animation = init
-            .subsystem
-            .compositor
-            .CreateVector3KeyFrameAnimation()
-            .unwrap();
-        implicit_move_animation
-            .InsertExpressionKeyFrame(0.0, h!("this.StartingValue"))
-            .unwrap();
-        implicit_move_animation
-            .InsertExpressionKeyFrameWithEasingFunction(
-                1.0,
-                h!("this.FinalValue"),
-                &init
-                    .subsystem
-                    .compositor
-                    .CreateCubicBezierEasingFunction(
-                        Vector2 { X: 0.5, Y: 0.0 },
-                        Vector2 { X: 0.5, Y: 1.0 },
-                    )
-                    .unwrap(),
-            )
-            .unwrap();
-        implicit_move_animation.SetTarget(h!("Offset")).unwrap();
-        implicit_move_animation
-            .SetDuration(SpriteListPaneView::TRANSITION_DURATION)
-            .unwrap();
+        let implicit_easing_animation = SimpleImplicitAnimationParams::new(
+            &init
+                .subsystem
+                .compositor
+                .CreateCubicBezierEasingFunction(
+                    Vector2 { X: 0.5, Y: 0.0 },
+                    Vector2 { X: 0.5, Y: 1.0 },
+                )
+                .unwrap(),
+            h!("Opacity"),
+            timespan_ms(100),
+        )
+        .instantiate_scalar(&init.subsystem.compositor)
+        .unwrap();
+        let implicit_move_animation = SimpleImplicitAnimationParams::new(
+            &init
+                .subsystem
+                .compositor
+                .CreateCubicBezierEasingFunction(
+                    Vector2 { X: 0.5, Y: 0.0 },
+                    Vector2 { X: 0.5, Y: 1.0 },
+                )
+                .unwrap(),
+            h!("Offset"),
+            SpriteListPaneView::TRANSITION_DURATION,
+        )
+        .instantiate_vector3(&init.subsystem.compositor)
+        .unwrap();
 
         let bg_implicit_animations = init
             .subsystem
@@ -2085,34 +1884,26 @@ impl SpriteListCellView {
                 Height: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
             })
             .unwrap();
-        let interop: ICompositionDrawingSurfaceInterop = s.cast().unwrap();
-        let mut offs = core::mem::MaybeUninit::uninit();
-        let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, offs.as_mut_ptr()).unwrap() };
-        let offs = unsafe { offs.assume_init() };
-        let r = 'drawing: {
+        draw_2d(&s, |dc, offset| {
             unsafe {
                 dc.SetDpi(dpi, dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    signed_pixels_to_dip(offset.x, dpi),
+                    signed_pixels_to_dip(offset.y, dpi),
+                ));
             }
 
-            let brush = scoped_try!(
-                'drawing,
-                unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None) }
-            );
-
-            let offs_dip = D2D_POINT_2F {
-                x: signed_pixels_to_dip(offs.x, dpi),
-                y: signed_pixels_to_dip(offs.y, dpi),
-            };
+            let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)? };
 
             unsafe {
                 dc.Clear(None);
                 dc.FillRoundedRectangle(
                     &D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
-                            left: offs_dip.x,
-                            top: offs_dip.y,
-                            right: offs_dip.x + Self::FRAME_TEX_SIZE,
-                            bottom: offs_dip.y + Self::FRAME_TEX_SIZE,
+                            left: 0.0,
+                            top: 0.0,
+                            right: Self::FRAME_TEX_SIZE,
+                            bottom: Self::FRAME_TEX_SIZE,
                         },
                         radiusX: Self::CORNER_RADIUS,
                         radiusY: Self::CORNER_RADIUS,
@@ -2121,12 +1912,9 @@ impl SpriteListCellView {
                 );
             }
 
-            Ok(())
-        };
-        unsafe {
-            interop.EndDraw().unwrap();
-        }
-        r.unwrap();
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         s
     }
@@ -2150,41 +1938,29 @@ impl SpriteListCellView {
                 Height: init.dip_to_pixels(tm.height),
             })
             .unwrap();
-        {
-            let interop = label_surface
-                .cast::<ICompositionDrawingSurfaceInterop>()
-                .unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                }
-
-                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None) });
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawTextLayout(
-                        D2D_POINT_2F {
-                            x: init.signed_pixels_to_dip(offset.x),
-                            y: init.signed_pixels_to_dip(offset.y),
-                        },
-                        &tl,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&label_surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
             }
-            r.unwrap();
-        }
+
+            let brush = unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None)? };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x),
+                        y: init.signed_pixels_to_dip(offset.y),
+                    },
+                    &tl,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         let bg_base_brush = CompositionNineGridBrushParams::new(
             &CompositionSurfaceBrushParams::new(&frame_tex)
@@ -2277,30 +2053,20 @@ impl SpriteListCellView {
         children.InsertAtTop(&bg).unwrap();
         children.InsertAtTop(&label).unwrap();
 
-        let opacity_transition = init
-            .subsystem
-            .compositor
-            .CreateScalarKeyFrameAnimation()
-            .unwrap();
-        opacity_transition
-            .InsertExpressionKeyFrame(0.0, h!("this.StartingValue"))
-            .unwrap();
-        opacity_transition
-            .InsertExpressionKeyFrameWithEasingFunction(
-                1.0,
-                h!("this.FinalValue"),
-                &init
-                    .subsystem
-                    .compositor
-                    .CreateCubicBezierEasingFunction(
-                        Vector2 { X: 0.5, Y: 0.0 },
-                        Vector2 { X: 0.5, Y: 1.0 },
-                    )
-                    .unwrap(),
-            )
-            .unwrap();
-        opacity_transition.SetDuration(timespan_ms(100)).unwrap();
-        opacity_transition.SetTarget(h!("Opacity")).unwrap();
+        let opacity_transition = SimpleImplicitAnimationParams::new(
+            &init
+                .subsystem
+                .compositor
+                .CreateCubicBezierEasingFunction(
+                    Vector2 { X: 0.5, Y: 0.0 },
+                    Vector2 { X: 0.5, Y: 1.0 },
+                )
+                .unwrap(),
+            h!("Opacity"),
+            timespan_ms(100),
+        )
+        .instantiate_scalar(&init.subsystem.compositor)
+        .unwrap();
 
         let bg_implicit_animations = init
             .subsystem
@@ -2385,41 +2151,29 @@ impl SpriteListCellView {
                 Height: dip_to_pixels(tm.height, dpi),
             })
             .unwrap();
-        {
-            let interop = label_surface
-                .cast::<ICompositionDrawingSurfaceInterop>()
-                .unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(dpi, dpi);
-                }
-
-                let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None) });
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawTextLayout(
-                        D2D_POINT_2F {
-                            x: signed_pixels_to_dip(offset.x, dpi),
-                            y: signed_pixels_to_dip(offset.y, dpi),
-                        },
-                        &tl,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&label_surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(dpi, dpi);
             }
-            r.unwrap();
-        }
+
+            let brush = unsafe { dc.CreateSolidColorBrush(&Self::LABEL_COLOR, None)? };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: signed_pixels_to_dip(offset.x, dpi),
+                        y: signed_pixels_to_dip(offset.y, dpi),
+                    },
+                    &tl,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         self.label
             .SetBrush(
@@ -2489,20 +2243,16 @@ impl SpriteListPaneView {
                 Height: dip_to_pixels(Self::FRAME_TEX_SIZE, dpi),
             })
             .unwrap();
-        let interop: ICompositionDrawingSurfaceInterop = s.cast().unwrap();
-        let mut offs = core::mem::MaybeUninit::uninit();
-        let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, offs.as_mut_ptr()).unwrap() };
-        let offs = unsafe { offs.assume_init() };
-        let r = 'drawing: {
+        draw_2d(&s, |dc, offset| {
             unsafe {
                 dc.SetDpi(dpi, dpi);
             }
 
-            let brush = scoped_try!('drawing, unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None) });
+            let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)? };
 
             let offs_dip = D2D_POINT_2F {
-                x: signed_pixels_to_dip(offs.x, dpi),
-                y: signed_pixels_to_dip(offs.y, dpi),
+                x: signed_pixels_to_dip(offset.x, dpi),
+                y: signed_pixels_to_dip(offset.y, dpi),
             };
 
             unsafe {
@@ -2522,12 +2272,9 @@ impl SpriteListPaneView {
                 );
             }
 
-            Ok(())
-        };
-        unsafe {
-            interop.EndDraw().unwrap();
-        }
-        r.unwrap();
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         s
     }
@@ -2544,27 +2291,23 @@ impl SpriteListPaneView {
 
         let bg_base_brush = create_instant_effect_brush(
             init.subsystem,
-            &CompositeEffectParams {
-                sources: &[
-                    GaussianBlurEffectParams {
-                        source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
-                        blur_amount: Some(Self::BLUR_AMOUNT / 3.0),
-                        name: None,
-                    }
-                    .instantiate()
-                    .unwrap()
-                    .cast()
-                    .unwrap(),
-                    ColorSourceEffectParams {
-                        color: Some(Self::SURFACE_COLOR),
-                    }
-                    .instantiate()
-                    .unwrap()
-                    .cast()
-                    .unwrap(),
-                ],
-                mode: None,
-            }
+            &CompositeEffectParams::new(&[
+                GaussianBlurEffectParams::new(
+                    &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                )
+                .blur_amount_px(Self::BLUR_AMOUNT)
+                .instantiate()
+                .unwrap()
+                .cast()
+                .unwrap(),
+                ColorSourceEffectParams {
+                    color: Some(Self::SURFACE_COLOR),
+                }
+                .instantiate()
+                .unwrap()
+                .cast()
+                .unwrap(),
+            ])
             .instantiate()
             .unwrap(),
             &[(
@@ -2637,44 +2380,29 @@ impl SpriteListPaneView {
                 Height: init.dip_to_pixels(tm.height),
             })
             .unwrap();
-        {
-            let interop = header_surface
-                .cast::<ICompositionDrawingSurfaceInterop>()
-                .unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                }
-
-                let brush = scoped_try!(
-                    'drawing,
-                    unsafe { dc.CreateSolidColorBrush(&Self::HEADER_LABEL_MAIN_COLOR, None) }
-                );
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawTextLayout(
-                        D2D_POINT_2F {
-                            x: init.signed_pixels_to_dip(offset.x),
-                            y: init.signed_pixels_to_dip(offset.y),
-                        },
-                        &tl,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&header_surface, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
             }
-            r.unwrap();
-        }
+
+            let brush = unsafe { dc.CreateSolidColorBrush(&Self::HEADER_LABEL_MAIN_COLOR, None)? };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x),
+                        y: init.signed_pixels_to_dip(offset.y),
+                    },
+                    &tl,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
         let header_surface_w = init
             .subsystem
             .new_2d_drawing_surface(Size {
@@ -2682,44 +2410,30 @@ impl SpriteListPaneView {
                 Height: init.dip_to_pixels(tm.height + 18.0),
             })
             .unwrap();
-        {
-            let interop = header_surface_w
-                .cast::<ICompositionDrawingSurfaceInterop>()
-                .unwrap();
-            let mut offset = core::mem::MaybeUninit::uninit();
-            let dc: ID2D1DeviceContext =
-                unsafe { interop.BeginDraw(None, offset.as_mut_ptr()).unwrap() };
-            let offset = unsafe { offset.assume_init() };
-            let r = 'drawing: {
-                unsafe {
-                    dc.SetDpi(init.dpi, init.dpi);
-                }
-
-                let brush = scoped_try!(
-                    'drawing,
-                    unsafe { dc.CreateSolidColorBrush(&Self::HEADER_LABEL_SHADOW_COLOR, None) }
-                );
-
-                unsafe {
-                    dc.Clear(None);
-                    dc.DrawTextLayout(
-                        D2D_POINT_2F {
-                            x: init.signed_pixels_to_dip(offset.x) + 9.0,
-                            y: init.signed_pixels_to_dip(offset.y) + 9.0,
-                        },
-                        &tl,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    );
-                }
-
-                Ok(())
-            };
+        draw_2d(&header_surface_w, |dc, offset| {
             unsafe {
-                interop.EndDraw().unwrap();
+                dc.SetDpi(init.dpi, init.dpi);
             }
-            r.unwrap();
-        }
+
+            let brush =
+                unsafe { dc.CreateSolidColorBrush(&Self::HEADER_LABEL_SHADOW_COLOR, None)? };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x) + 9.0,
+                        y: init.signed_pixels_to_dip(offset.y) + 9.0,
+                    },
+                    &tl,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
 
         let header = SpriteVisualParams::new(
             &CompositionSurfaceBrushParams::new(&header_surface)
@@ -2740,11 +2454,10 @@ impl SpriteListPaneView {
         let header_bg = SpriteVisualParams::new(
             &create_instant_effect_brush(
                 init.subsystem,
-                &GaussianBlurEffectParams {
-                    source: &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
-                    blur_amount: Some(18.0 / 3.0),
-                    name: None,
-                }
+                &GaussianBlurEffectParams::new(
+                    &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                )
+                .blur_amount_px(18.0)
                 .instantiate()
                 .unwrap(),
                 &[(
@@ -4255,7 +3968,7 @@ fn main() {
     };
     let subsystem = Rc::new(Subsystem::new());
     let ui_thread_wakeup_event =
-        Arc::new(NativeEvent::new(false, w!("UIThreadWakeupEvent")).unwrap());
+        Arc::new(NativeEvent::new(true, w!("UIThreadWakeupEvent")).unwrap());
     let background_worker = BackgroundWorker::new(&ui_thread_wakeup_event);
 
     let cls = WNDCLASSEXW {
@@ -4310,8 +4023,7 @@ fn main() {
         .expect("Failed to set dark mode preference");
     }
 
-    let mut bg_worker_vf = Vec::with_capacity(background_worker.join_handles.len());
-    bg_worker_vf.resize_with(background_worker.join_handles.len(), || None);
+    let mut bg_worker_vf = vec![None; background_worker.worker_count()];
     let bg_worker_vf_update_callback: Rc<RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>> =
         Rc::new(RefCell::new(Vec::new()));
     let app_state = Rc::new(RefCell::new(AppState::new()));
@@ -4365,7 +4077,7 @@ fn main() {
     'app: loop {
         let r = unsafe {
             MsgWaitForMultipleObjects(
-                Some(&[ui_thread_wakeup_event.0, grid_view_render_waits]),
+                Some(&[ui_thread_wakeup_event.handle(), grid_view_render_waits]),
                 false,
                 INFINITE,
                 QS_ALLINPUT,
@@ -4374,32 +4086,26 @@ fn main() {
 
         if r == WAIT_OBJECT_0 {
             // notify to ui thread
-            loop {
-                match background_worker.view_feedback_receiver.try_recv() {
-                    Ok(BackgroundWorkerViewFeedback::BeginWork(n, msg)) => {
+            while let Some(vf) = background_worker.try_pop_view_feedback() {
+                match vf {
+                    BackgroundWorkerViewFeedback::BeginWork(n, msg) => {
                         tracing::info!("Thread #{n} has started a work: {msg}");
                         bg_worker_vf[n] = Some(msg);
                         for x in bg_worker_vf_update_callback.borrow_mut().iter_mut() {
                             x(&bg_worker_vf);
                         }
                     }
-                    Ok(BackgroundWorkerViewFeedback::EndWork(n)) => {
+                    BackgroundWorkerViewFeedback::EndWork(n) => {
                         tracing::info!("Thread #{n} has finished a work");
                         bg_worker_vf[n] = None;
                         for x in bg_worker_vf_update_callback.borrow_mut().iter_mut() {
                             x(&bg_worker_vf);
                         }
                     }
-                    Err(crossbeam::channel::TryRecvError::Empty) => {
-                        break;
-                    }
-                    Err(crossbeam::channel::TryRecvError::Disconnected) => {
-                        tracing::warn!("background worker view feedback channel was disconnected");
-                        break;
-                    }
                 }
             }
 
+            ui_thread_wakeup_event.reset();
             continue;
         }
         if r.0 == WAIT_OBJECT_0.0 + 1 {
