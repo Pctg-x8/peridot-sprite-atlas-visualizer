@@ -16,6 +16,15 @@ pub struct SpriteInfo {
     pub bottom_slice: u32,
     pub selected: bool,
 }
+impl SpriteInfo {
+    pub const fn right(&self) -> u32 {
+        self.left + self.width
+    }
+
+    pub const fn bottom(&self) -> u32 {
+        self.top + self.height
+    }
+}
 
 pub struct AppState {
     atlas_size: SizePixels,
@@ -42,18 +51,46 @@ impl AppState {
         let mut max_required_size = self.atlas_size;
         while let Some(n) = iter.next() {
             // Power of Twoに丸める（そうするとUV計算が正確になるため）
-            max_required_size.width = max_required_size
-                .width
-                .max(n.left + n.width)
-                .next_power_of_two();
-            max_required_size.height = max_required_size
-                .height
-                .max(n.top + n.height)
-                .next_power_of_two();
+            max_required_size.width = max_required_size.width.max(n.right()).next_power_of_two();
+            max_required_size.height = max_required_size.height.max(n.bottom()).next_power_of_two();
 
             self.sprites.push(n);
         }
 
+        if max_required_size != self.atlas_size {
+            self.atlas_size = max_required_size;
+            for cb in self.atlas_size_view_feedbacks.iter_mut() {
+                cb(&self.atlas_size);
+            }
+        }
+
+        for cb in self.sprites_view_feedbacks.iter_mut() {
+            cb(&self.sprites);
+        }
+    }
+
+    pub fn selected_sprites_with_index(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (usize, &SpriteInfo)> {
+        self.sprites.iter().enumerate().filter(|(_, x)| x.selected)
+    }
+
+    pub fn set_sprite_offset(&mut self, index: usize, left_pixels: u32, top_pixels: u32) {
+        let target_sprite = &mut self.sprites[index];
+        target_sprite.left = left_pixels;
+        target_sprite.top = top_pixels;
+
+        // Sprite Atlasのサイズ調整
+        let mut max_required_size = self.atlas_size;
+        // Power of Twoに丸める（そうするとUV計算が正確になるため）
+        max_required_size.width = max_required_size
+            .width
+            .max(target_sprite.right())
+            .next_power_of_two();
+        max_required_size.height = max_required_size
+            .height
+            .max(target_sprite.bottom())
+            .next_power_of_two();
         if max_required_size != self.atlas_size {
             self.atlas_size = max_required_size;
             for cb in self.atlas_size_view_feedbacks.iter_mut() {

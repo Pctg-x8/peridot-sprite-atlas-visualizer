@@ -845,6 +845,44 @@ impl AtlasBaseGridView {
         *self.resize_order.write() = Some((new_width_px, new_height_px));
     }
 
+    pub fn update_sprite_offset(&self, index: usize, left_pixels: f32, top_pixels: f32) {
+        let c = D3D11CriticalSectionGuard::enter(&self.d3d11_mt);
+        let mut sprite_instance_buffer = self.sprite_instance_buffer.write();
+
+        let mut mapped = MaybeUninit::uninit();
+        unsafe {
+            self.d3d11_device_context
+                .Map(
+                    &sprite_instance_buffer.staging,
+                    0,
+                    D3D11_MAP_WRITE,
+                    0,
+                    Some(mapped.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let mapped = unsafe { mapped.assume_init() };
+        unsafe {
+            let instance_ptr = (mapped.pData as *mut SpriteInstance).add(index);
+            core::ptr::write(
+                core::ptr::addr_of_mut!((*instance_ptr).pos_st[2]),
+                left_pixels,
+            );
+            core::ptr::write(
+                core::ptr::addr_of_mut!((*instance_ptr).pos_st[3]),
+                top_pixels,
+            );
+
+            sprite_instance_buffer.is_dirty = true;
+        }
+        unsafe {
+            self.d3d11_device_context
+                .Unmap(&sprite_instance_buffer.staging, 0);
+        }
+
+        drop(c);
+    }
+
     pub fn update_sprites(&self, sprites: &[SpriteInfo]) {
         let Some(background_worker_enqueue_access) =
             self.background_worker_enqueue_access.upgrade()
@@ -1089,6 +1127,9 @@ impl AtlasBaseGridView {
                 );
             }
         }
+
+        let sprite_instance_buffer1 = sprite_instance_buffer.buffer.clone();
+        let sprite_instance_count = sprite_instance_buffer.count;
         drop(sprite_instance_buffer);
 
         drop(c);
@@ -1150,7 +1191,7 @@ impl AtlasBaseGridView {
                 Some(
                     [
                         Some(self.sprite_instance_base_vb.clone()),
-                        Some(self.sprite_instance_buffer.read().buffer.clone()),
+                        Some(sprite_instance_buffer1),
                     ]
                     .as_ptr(),
                 ),
@@ -1163,12 +1204,8 @@ impl AtlasBaseGridView {
                 ),
                 Some([0u32, 0u32].as_ptr()),
             );
-            self.d3d11_device_context.DrawInstanced(
-                4,
-                self.sprite_instance_buffer.read().count as _,
-                0,
-                0,
-            );
+            self.d3d11_device_context
+                .DrawInstanced(4, sprite_instance_count as _, 0, 0);
             /*self.d3d11_device_context
                 .VSSetShader(&self.texture_preview_vsh, None);
             self.d3d11_device_context
@@ -3341,13 +3378,32 @@ impl QuadTree {
     }
 }
 
+enum DragState {
+    None,
+    Grid {
+        base_x_pixels: f32,
+        base_y_pixels: f32,
+        drag_start_client_x_pixels: f32,
+        drag_start_client_y_pixels: f32,
+    },
+    Sprite {
+        index: usize,
+        base_x_pixels: f32,
+        base_y_pixels: f32,
+        base_width_pixels: f32,
+        base_height_pixels: f32,
+        drag_start_client_x_pixels: f32,
+        drag_start_client_y_pixels: f32,
+    },
+}
+
 struct AppWindowHitTestTreeActionHandler {
     grid_view: Arc<AtlasBaseGridView>,
     sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     qt: RefCell<QuadTree>,
     sprite_rect_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
-    drag_data: Cell<Option<(f32, f32, f32, f32)>>,
+    drag_data: RefCell<DragState>,
     dpi: Cell<f32>,
     ht_root: HitTestTreeRef,
 }
@@ -3357,7 +3413,7 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut AppState,
+        context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
@@ -3365,12 +3421,38 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         if sender == self.ht_root {
             let dpi = self.dpi.get();
             let (current_offset_x, current_offset_y) = *self.grid_view.offset_pixels.read();
-            self.drag_data.set(Some((
-                current_offset_x,
-                current_offset_y,
-                dip_to_pixels(client_x, dpi),
-                dip_to_pixels(client_y, dpi),
-            )));
+
+            let (pointing_x, pointing_y) = (
+                dip_to_pixels(client_x, dpi) + current_offset_x,
+                dip_to_pixels(client_y, dpi) + current_offset_y,
+            );
+            let sprite_drag_target_index =
+                context.selected_sprites_with_index().rev().find(|(_, x)| {
+                    x.left as f32 <= pointing_x
+                        && pointing_x <= x.right() as f32
+                        && x.top as f32 <= pointing_y
+                        && pointing_y <= x.bottom() as f32
+                });
+            if let Some((sprite_drag_target_index, target_sprite_ref)) = sprite_drag_target_index {
+                // 選択中のスプライトの上で操作が開始された
+                self.selected_sprite_marker_view.hide();
+                *self.drag_data.borrow_mut() = DragState::Sprite {
+                    index: sprite_drag_target_index,
+                    base_x_pixels: target_sprite_ref.left as f32,
+                    base_y_pixels: target_sprite_ref.top as f32,
+                    base_width_pixels: target_sprite_ref.width as f32,
+                    base_height_pixels: target_sprite_ref.height as f32,
+                    drag_start_client_x_pixels: dip_to_pixels(client_x, dpi),
+                    drag_start_client_y_pixels: dip_to_pixels(client_y, dpi),
+                };
+            } else {
+                *self.drag_data.borrow_mut() = DragState::Grid {
+                    base_x_pixels: current_offset_x,
+                    base_y_pixels: current_offset_y,
+                    drag_start_client_x_pixels: dip_to_pixels(client_x, dpi),
+                    drag_start_client_y_pixels: dip_to_pixels(client_y, dpi),
+                };
+            }
 
             return EventContinueControl::STOP_PROPAGATION | EventContinueControl::CAPTURE_ELEMENT;
         }
@@ -3389,19 +3471,49 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         _client_height: f32,
     ) -> EventContinueControl {
         if sender == self.ht_root {
-            if let Some((base_x, base_y, org_x, org_y)) = self.drag_data.get() {
-                let dpi = self.dpi.get();
-                let (dx, dy) = (
-                    org_x - dip_to_pixels(client_x, dpi),
-                    org_y - dip_to_pixels(client_y, dpi),
-                );
-                self.grid_view.set_offset(base_x + dx, base_y + dy);
-                self.sprite_atlas_border_view
-                    .set_view_offset(base_x + dx, base_y + dy);
-                self.selected_sprite_marker_view
-                    .set_view_offset(base_x + dx, base_y + dy);
+            match &*self.drag_data.borrow() {
+                DragState::None => {}
+                &DragState::Grid {
+                    base_x_pixels,
+                    base_y_pixels,
+                    drag_start_client_x_pixels,
+                    drag_start_client_y_pixels,
+                } => {
+                    let dpi = self.dpi.get();
+                    let (dx, dy) = (
+                        drag_start_client_x_pixels - dip_to_pixels(client_x, dpi),
+                        drag_start_client_y_pixels - dip_to_pixels(client_y, dpi),
+                    );
+                    self.grid_view
+                        .set_offset(base_x_pixels + dx, base_y_pixels + dy);
+                    self.sprite_atlas_border_view
+                        .set_view_offset(base_x_pixels + dx, base_y_pixels + dy);
+                    self.selected_sprite_marker_view
+                        .set_view_offset(base_x_pixels + dx, base_y_pixels + dy);
 
-                return EventContinueControl::STOP_PROPAGATION;
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
+                &DragState::Sprite {
+                    index,
+                    base_x_pixels,
+                    base_y_pixels,
+                    drag_start_client_x_pixels,
+                    drag_start_client_y_pixels,
+                    ..
+                } => {
+                    let dpi = self.dpi.get();
+                    let (dx, dy) = (
+                        dip_to_pixels(client_x, dpi) - drag_start_client_x_pixels,
+                        dip_to_pixels(client_y, dpi) - drag_start_client_y_pixels,
+                    );
+                    let (sx, sy) = (
+                        (base_x_pixels + dx).max(0.0) as u32,
+                        (base_y_pixels + dy).max(0.0) as u32,
+                    );
+                    self.grid_view.update_sprite_offset(index, sx as _, sy as _);
+
+                    return EventContinueControl::STOP_PROPAGATION;
+                }
             }
         }
 
@@ -3411,23 +3523,60 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     fn on_pointer_up(
         &self,
         sender: HitTestTreeRef,
-        _context: &mut AppState,
+        context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
         if sender == self.ht_root {
-            if let Some((base_x, base_y, org_x, org_y)) = self.drag_data.replace(None) {
-                let dpi = self.dpi.get();
-                let (dx, dy) = (
-                    org_x - dip_to_pixels(client_x, dpi),
-                    org_y - dip_to_pixels(client_y, dpi),
-                );
-                self.grid_view.set_offset(base_x + dx, base_y + dy);
-                self.sprite_atlas_border_view
-                    .set_view_offset(base_x + dx, base_y + dy);
-                self.selected_sprite_marker_view
-                    .set_view_offset(base_x + dx, base_y + dy);
+            match core::mem::replace(&mut *self.drag_data.borrow_mut(), DragState::None) {
+                DragState::None => {}
+                DragState::Grid {
+                    base_x_pixels,
+                    base_y_pixels,
+                    drag_start_client_x_pixels,
+                    drag_start_client_y_pixels,
+                } => {
+                    let dpi = self.dpi.get();
+                    let (dx, dy) = (
+                        drag_start_client_x_pixels - dip_to_pixels(client_x, dpi),
+                        drag_start_client_y_pixels - dip_to_pixels(client_y, dpi),
+                    );
+                    self.grid_view
+                        .set_offset(base_x_pixels + dx, base_y_pixels + dy);
+                    self.sprite_atlas_border_view
+                        .set_view_offset(base_x_pixels + dx, base_y_pixels + dy);
+                    self.selected_sprite_marker_view
+                        .set_view_offset(base_x_pixels + dx, base_y_pixels + dy);
+                }
+                DragState::Sprite {
+                    index,
+                    base_x_pixels,
+                    base_y_pixels,
+                    base_width_pixels,
+                    base_height_pixels,
+                    drag_start_client_x_pixels,
+                    drag_start_client_y_pixels,
+                } => {
+                    let dpi = self.dpi.get();
+                    let (dx, dy) = (
+                        dip_to_pixels(client_x, dpi) - drag_start_client_x_pixels,
+                        dip_to_pixels(client_y, dpi) - drag_start_client_y_pixels,
+                    );
+                    let (sx, sy) = (
+                        (base_x_pixels + dx).max(0.0) as u32,
+                        (base_y_pixels + dy).max(0.0) as u32,
+                    );
+                    context.set_sprite_offset(index, sx, sy);
+
+                    // 選択インデックスが変わるわけではないのでここで選択枠Viewを復帰させる
+                    self.selected_sprite_marker_view.focus(
+                        sx as _,
+                        sy as _,
+                        base_width_pixels,
+                        base_height_pixels,
+                    );
+                }
             }
 
             return EventContinueControl::STOP_PROPAGATION
@@ -3571,7 +3720,7 @@ impl AppWindowPresenter {
             selected_sprite_marker_view: selected_sprite_marker_view.clone(),
             qt: RefCell::new(QuadTree::new()),
             sprite_rect_cached: RefCell::new(Vec::new()),
-            drag_data: Cell::new(None),
+            drag_data: RefCell::new(DragState::None),
             dpi: Cell::new(init.for_view.dpi),
             ht_root,
         });
