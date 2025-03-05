@@ -18,7 +18,7 @@ use color_factory::{
     d2d1_color_f_from_hex_rgb, d2d1_color_f_from_websafe_hex_rgb, ui_color_from_hex_rgb,
     ui_color_from_websafe_hex_rgb_with_alpha,
 };
-use component::app_header::AppHeaderView;
+use component::{app_header::AppHeaderView, dnd_overlay::FileDragAndDropOverlayView};
 use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
     ContainerVisualParams, SimpleImplicitAnimationParams, SimpleScalarAnimationParams,
@@ -28,7 +28,6 @@ use coordinate::*;
 use effect_builder::{
     ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams, TintEffectParams,
 };
-use extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite;
 use hittest::HitTestTreeActionHandler;
 use hittest::*;
 use image::EncodableLayout;
@@ -37,6 +36,7 @@ use native_wrapper::NativeEvent;
 use parking_lot::RwLock;
 use subsystem::Subsystem;
 use surface_helper::draw_2d;
+use timespan_helper::timespan_ms;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
@@ -71,10 +71,7 @@ use windows::{
                 ID3D11DeviceContext, ID3D11InputLayout, ID3D11Multithread, ID3D11PixelShader,
                 ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
             },
-            DirectWrite::{
-                DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_LIGHT, DWRITE_TEXT_RANGE,
-                IDWriteTextLayout1,
-            },
+            DirectWrite::{DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_RANGE, IDWriteTextLayout1},
             Dwm::{
                 DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
             },
@@ -145,6 +142,7 @@ mod native_wrapper;
 mod source_reader;
 mod subsystem;
 mod surface_helper;
+mod timespan_helper;
 
 type AppHitTestTreeManager = HitTestTreeManager<AppState>;
 
@@ -155,12 +153,6 @@ macro_rules! scoped_try {
             Ok(v) => v,
             Err(e) => break $label Err(e)
         }
-    }
-}
-
-const fn timespan_ms(ms: u32) -> TimeSpan {
-    TimeSpan {
-        Duration: (10_000 * ms) as _,
     }
 }
 
@@ -2884,8 +2876,6 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
     }
 }
 
-// TODO: CellViewのプールがすでにArenaになっているので、あとでそれ前提で組み直したい
-
 pub struct SpriteListPanePresenter {
     view: Rc<SpriteListPaneView>,
     _ht_action_handler: Rc<SpriteListPaneHitActionHandler>,
@@ -3041,210 +3031,6 @@ impl SpriteListPanePresenter {
     }
 }
 
-pub struct FileDragAndDropOverlayView {
-    root: SpriteVisual,
-    composition_params: CompositionPropertySet,
-    show_animation: ScalarKeyFrameAnimation,
-    hide_animation: ScalarKeyFrameAnimation,
-}
-impl FileDragAndDropOverlayView {
-    pub fn new(init: &mut ViewInitContext) -> Self {
-        let effect_factory = init
-            .subsystem
-            .compositor
-            .CreateEffectFactoryWithProperties(
-                &CompositeEffectParams::new(&[
-                    GaussianBlurEffectParams::new(
-                        &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
-                    )
-                    .name(h!("Blur"))
-                    .instantiate()
-                    .unwrap()
-                    .cast()
-                    .unwrap(),
-                    ColorSourceEffectParams {
-                        color: Some(ui_color_from_websafe_hex_rgb_with_alpha(0xfff, 64)),
-                    }
-                    .instantiate()
-                    .unwrap()
-                    .cast()
-                    .unwrap(),
-                ])
-                .mode(CanvasComposite::SourceOver)
-                .instantiate()
-                .unwrap(),
-                &windows_collections::IIterable::<HSTRING>::from(vec![
-                    h!("Blur.BlurAmount").clone(),
-                ]),
-            )
-            .unwrap();
-
-        let bg_brush = effect_factory.CreateBrush().unwrap();
-        bg_brush
-            .SetSourceParameter(
-                h!("source"),
-                &init.subsystem.compositor.CreateBackdropBrush().unwrap(),
-            )
-            .unwrap();
-        let root = SpriteVisualParams::new(&bg_brush)
-            .expand()
-            .instantiate(&init.subsystem.compositor)
-            .unwrap();
-
-        let label_text_utf16 = "ドロップしてファイルを追加"
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        let label = unsafe {
-            init.subsystem
-                .dwrite_factory
-                .CreateTextLayout(
-                    &label_text_utf16,
-                    &init.subsystem.default_ui_format,
-                    f32::MAX,
-                    f32::MAX,
-                )
-                .unwrap()
-        };
-        unsafe {
-            label
-                .SetFontSize(
-                    96.0,
-                    DWRITE_TEXT_RANGE {
-                        startPosition: 0,
-                        length: label_text_utf16.len() as _,
-                    },
-                )
-                .unwrap();
-            label
-                .SetFontWeight(
-                    DWRITE_FONT_WEIGHT_SEMI_LIGHT,
-                    DWRITE_TEXT_RANGE {
-                        startPosition: 0,
-                        length: label_text_utf16.len() as _,
-                    },
-                )
-                .unwrap();
-        }
-        let mut metrics = core::mem::MaybeUninit::uninit();
-        unsafe {
-            label.GetMetrics(metrics.as_mut_ptr()).unwrap();
-        }
-        let metrics = unsafe { metrics.assume_init() };
-        let label_surface = init
-            .subsystem
-            .new_2d_drawing_surface(Size {
-                Width: init.dip_to_pixels(metrics.width),
-                Height: init.dip_to_pixels(metrics.height),
-            })
-            .unwrap();
-        draw_2d(&label_surface, |dc, offset| {
-            unsafe {
-                dc.SetDpi(init.dpi, init.dpi);
-
-                dc.Clear(None);
-                dc.DrawTextLayout(
-                    D2D_POINT_2F {
-                        x: init.signed_pixels_to_dip(offset.x),
-                        y: init.signed_pixels_to_dip(offset.y),
-                    },
-                    &label,
-                    &dc.CreateSolidColorBrush(&d2d1_color_f_from_websafe_hex_rgb(0xccc), None)?,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-        let label = SpriteVisualParams::new(
-            &CompositionSurfaceBrushParams::new(&label_surface)
-                .instantiate(&init.subsystem.compositor)
-                .unwrap(),
-        )
-        .size(Vector2 {
-            X: init.dip_to_pixels(metrics.width),
-            Y: init.dip_to_pixels(metrics.height),
-        })
-        .anchor_point(Vector2 { X: 0.5, Y: 0.5 })
-        .relative_offset_adjustment_xy(Vector2 { X: 0.5, Y: 0.5 })
-        .instantiate(&init.subsystem.compositor)
-        .unwrap();
-
-        root.Children().unwrap().InsertAtTop(&label).unwrap();
-
-        let composition_params = init.subsystem.compositor.CreatePropertySet().unwrap();
-        composition_params.InsertScalar(h!("Rate"), 0.0).unwrap();
-
-        let bg_blur_expression = init
-            .subsystem
-            .compositor
-            .CreateExpressionAnimationWithExpression(h!("cp.Rate * 63.0 / 3.0"))
-            .unwrap();
-        bg_blur_expression
-            .SetExpressionReferenceParameter(h!("cp"), &composition_params)
-            .unwrap();
-        bg_brush
-            .Properties()
-            .unwrap()
-            .InsertScalar(h!("Blur.BlurAmount"), 0.0)
-            .unwrap();
-        bg_brush
-            .Properties()
-            .unwrap()
-            .StartAnimation(h!("Blur.BlurAmount"), &bg_blur_expression)
-            .unwrap();
-
-        let opacity_expression = init
-            .subsystem
-            .compositor
-            .CreateExpressionAnimationWithExpression(h!("cp.Rate"))
-            .unwrap();
-        opacity_expression
-            .SetExpressionReferenceParameter(h!("cp"), &composition_params)
-            .unwrap();
-        root.SetOpacity(0.0).unwrap();
-        root.StartAnimation(h!("Opacity"), &opacity_expression)
-            .unwrap();
-
-        let easing = init
-            .subsystem
-            .compositor
-            .CreateCubicBezierEasingFunction(Vector2 { X: 0.5, Y: 0.0 }, Vector2 { X: 0.5, Y: 1.0 })
-            .unwrap();
-        let show_animation = SimpleScalarAnimationParams::new(0.0, 1.0, &easing)
-            .duration(timespan_ms(200))
-            .instantiate(&init.subsystem.compositor)
-            .unwrap();
-        let hide_animation = SimpleScalarAnimationParams::new(1.0, 0.0, &easing)
-            .duration(timespan_ms(200))
-            .instantiate(&init.subsystem.compositor)
-            .unwrap();
-
-        Self {
-            root,
-            composition_params,
-            show_animation,
-            hide_animation,
-        }
-    }
-
-    pub fn mount(&self, children: &VisualCollection) {
-        children.InsertAtTop(&self.root).unwrap();
-    }
-
-    pub fn show(&self) {
-        self.composition_params
-            .StartAnimation(h!("Rate"), &self.show_animation)
-            .unwrap();
-    }
-
-    pub fn hide(&self) {
-        self.composition_params
-            .StartAnimation(h!("Rate"), &self.hide_animation)
-            .unwrap();
-    }
-}
-
 pub struct QuadTreeElementIndexIter<'a> {
     qt: &'a QuadTree,
     index: u64,
@@ -3327,6 +3113,17 @@ impl QuadTree {
         }
     }
 
+    const fn interleave(bits: u64) -> u64 {
+        let bits = (bits | (bits << 32)) & 0xffff_ffff_ffff_ffff;
+        let bits = (bits | (bits << 16)) & 0x0000_ffff_0000_ffff;
+        let bits = (bits | (bits << 8)) & 0x00ff_00ff_00ff_00ff;
+        let bits = (bits | (bits << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+        let bits = (bits | (bits << 2)) & 0x3333_3333_3333_3333;
+        let bits = (bits | (bits << 1)) & 0x5555_5555_5555_5555;
+
+        bits
+    }
+
     pub const fn compute_location_index(location_x_pixels: u32, location_y_pixels: u32) -> u64 {
         // 一旦一律16(2^4)px角まで分割する
         let (xv, yv) = (
@@ -3338,20 +3135,7 @@ impl QuadTree {
         assert!(xv.leading_zeros() >= 32, "too many divisions!");
         assert!(yv.leading_zeros() >= 32, "too many divisions!");
 
-        let xv = (xv | (xv << 32)) & 0xffff_ffff_ffff_ffff;
-        let xv = (xv | (xv << 16)) & 0x0000_ffff_0000_ffff;
-        let xv = (xv | (xv << 8)) & 0x00ff_00ff_00ff_00ff;
-        let xv = (xv | (xv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        let xv = (xv | (xv << 2)) & 0x3333_3333_3333_3333;
-        let xv = (xv | (xv << 1)) & 0x5555_5555_5555_5555;
-        let yv = (yv | (yv << 32)) & 0xffff_ffff_ffff_ffff;
-        let yv = (yv | (yv << 16)) & 0x0000_ffff_0000_ffff;
-        let yv = (yv | (yv << 8)) & 0x00ff_00ff_00ff_00ff;
-        let yv = (yv | (yv << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        let yv = (yv | (yv << 2)) & 0x3333_3333_3333_3333;
-        let yv = (yv | (yv << 1)) & 0x5555_5555_5555_5555;
-
-        xv | (yv << 1)
+        Self::interleave(xv) | (Self::interleave(yv) << 1)
     }
 
     pub const fn rect_index_and_level(
@@ -3640,8 +3424,8 @@ struct AppWindowPresenter {
     root: ContainerVisual,
     ht_root: HitTestTreeRef,
     grid_view: Arc<AtlasBaseGridView>,
-    sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
-    selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
+    _sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
+    _selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     sprite_list_pane: SpriteListPanePresenter,
     header_view: AppHeaderView,
     file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
@@ -3780,8 +3564,8 @@ impl AppWindowPresenter {
                     // 移動分
                     if old.0 == new.left
                         && old.1 == new.top
-                        && old.2 == new.left + new.width
-                        && old.3 == new.top + new.height
+                        && old.2 == new.right()
+                        && old.3 == new.bottom()
                     {
                         // 座標変化なし
                         continue;
@@ -3792,15 +3576,10 @@ impl AppWindowPresenter {
                     let (new_index, new_level) = QuadTree::rect_index_and_level(
                         new.left,
                         new.top,
-                        new.left + new.width,
-                        new.top + new.height,
+                        new.right(),
+                        new.bottom(),
                     );
-                    *old = (
-                        new.left,
-                        new.top,
-                        new.left + new.width,
-                        new.top + new.height,
-                    );
+                    *old = (new.left, new.top, new.right(), new.bottom());
 
                     if old_level == new_level && old_index == new_index {
                         // 所属ブロックに変化なし
@@ -3821,15 +3600,15 @@ impl AppWindowPresenter {
                     let (index, level) = QuadTree::rect_index_and_level(
                         new.left,
                         new.top,
-                        new.left + new.width,
-                        new.top + new.height,
+                        new.right(),
+                        new.bottom(),
                     );
                     ht_action_handler.qt.borrow_mut().bind(level, index, n);
                     ht_action_handler.sprite_rect_cached.borrow_mut().push((
                         new.left,
                         new.top,
-                        new.left + new.width,
-                        new.top + new.height,
+                        new.right(),
+                        new.bottom(),
                     ));
                 }
 
@@ -3871,8 +3650,8 @@ impl AppWindowPresenter {
             root,
             ht_root,
             grid_view,
-            sprite_atlas_border_view,
-            selected_sprite_marker_view,
+            _sprite_atlas_border_view: sprite_atlas_border_view,
+            _selected_sprite_marker_view: selected_sprite_marker_view,
             sprite_list_pane,
             header_view,
             file_dnd_overlay,
@@ -3888,7 +3667,7 @@ struct AppWindowStateModel {
     dpi: f32,
     dpi_handlers: Vec<std::rc::Weak<dyn DpiHandler>>,
     pointer_input_manager: PointerInputManager,
-    composition_target: DesktopWindowTarget,
+    _composition_target: DesktopWindowTarget,
     root_presenter: AppWindowPresenter,
     app_state: Rc<RefCell<AppState>>,
 }
@@ -3953,7 +3732,7 @@ impl AppWindowStateModel {
             dpi,
             dpi_handlers,
             pointer_input_manager,
-            composition_target,
+            _composition_target: composition_target,
             root_presenter,
             app_state: app_state.clone(),
         }

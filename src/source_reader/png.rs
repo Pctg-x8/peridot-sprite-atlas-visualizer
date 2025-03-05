@@ -32,6 +32,9 @@ impl Metadata {
         if chunk_type != *b"IHDR" {
             panic!("invalid png format: no IHDR chunk at head");
         }
+        if chunk_data_byte_length < 8 {
+            panic!("IHDR chunk is too short");
+        }
 
         let mut width = 0u32;
         let mut height = 0u32;

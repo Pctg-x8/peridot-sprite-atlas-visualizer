@@ -15,7 +15,7 @@ use windows::{
             },
             Direct2D::{
                 D2D1_DEBUG_LEVEL_WARNING, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_MULTI_THREADED,
-                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Device, ID2D1Factory1,
+                D2D1CreateFactory, ID2D1Device, ID2D1Factory1,
             },
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
