@@ -35,7 +35,9 @@ fn main() {
         .spawn()
         .unwrap()
         .wait()
-        .unwrap();
+        .unwrap()
+        .success()
+        .ensure();
     std::process::Command::new(&fxc_path)
         .args(["/E", "main", "/T", "ps_5_0", "/Fo"])
         .arg(project_root.join("resources/grid/psh.fxc"))
@@ -43,7 +45,9 @@ fn main() {
         .spawn()
         .unwrap()
         .wait()
-        .unwrap();
+        .unwrap()
+        .success()
+        .ensure();
     std::process::Command::new(&fxc_path)
         .args(["/E", "main", "/T", "vs_5_0", "/Fo"])
         .arg(project_root.join("resources/sprite_instance/vsh.fxc"))
@@ -51,7 +55,9 @@ fn main() {
         .spawn()
         .unwrap()
         .wait()
-        .unwrap();
+        .unwrap()
+        .success()
+        .ensure();
     std::process::Command::new(&fxc_path)
         .args(["/E", "main", "/T", "ps_5_0", "/Fo"])
         .arg(project_root.join("resources/sprite_instance/psh.fxc"))
@@ -59,7 +65,29 @@ fn main() {
         .spawn()
         .unwrap()
         .wait()
-        .unwrap();
+        .unwrap()
+        .success()
+        .ensure();
+    std::process::Command::new(&fxc_path)
+        .args(["/E", "main", "/T", "vs_5_0", "/Fo"])
+        .arg(project_root.join("resources/atlas_bg/vsh.fxc"))
+        .arg(project_root.join("resources/atlas_bg/vsh.hlsl"))
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap()
+        .success()
+        .ensure();
+    std::process::Command::new(&fxc_path)
+        .args(["/E", "main", "/T", "ps_5_0", "/Fo"])
+        .arg(project_root.join("resources/atlas_bg/psh.fxc"))
+        .arg(project_root.join("resources/atlas_bg/psh.hlsl"))
+        .spawn()
+        .unwrap()
+        .wait()
+        .unwrap()
+        .success()
+        .ensure();
 
     // build rc
     std::process::Command::new(win10_sdk_bin_folder.join("rc.exe"))
@@ -266,5 +294,17 @@ impl Windows10SDK {
             .join("bin")
             .join(&self.product_version)
             .join(bits_str)
+    }
+}
+
+trait BoolExt {
+    fn ensure(self);
+}
+
+impl BoolExt for bool {
+    fn ensure(self) {
+        if !self {
+            panic!("failed!");
+        }
     }
 }

@@ -392,6 +392,12 @@ pub struct AtlasBaseGridView {
     sprite_instance_base_vb: ID3D11Buffer,
     sprite_instance_input_layout: ID3D11InputLayout,
     sprite_instance_buffer: RwLock<SpriteInstanceBuffer>,
+    atlas_bg_vsh: ID3D11VertexShader,
+    atlas_bg_psh: ID3D11PixelShader,
+    atlas_bg_input_layout: ID3D11InputLayout,
+    atlas_bg_vb: ID3D11Buffer,
+    atlas_bg_vertices: RwLock<[[f32; 2]; 4]>,
+    atlas_bg_vertices_dirty: RwLock<bool>,
     tex_sampler: ID3D11SamplerState,
     size_pixels: RwLock<(u32, u32)>,
     resize_order: RwLock<Option<(u32, u32)>>,
@@ -704,6 +710,66 @@ impl AtlasBaseGridView {
         let sprite_instance_buffer_staging =
             unsafe { sprite_instance_buffer_staging.assume_init().unwrap() };
 
+        let atlas_bg_vertices = [[0.0, 0.0], [128.0, 0.0], [0.0, 128.0], [128.0, 128.0]];
+        let mut atlas_bg_vsh = MaybeUninit::uninit();
+        let mut atlas_bg_psh = MaybeUninit::uninit();
+        let mut atlas_bg_input_layout = MaybeUninit::uninit();
+        let mut atlas_bg_vb = MaybeUninit::uninit();
+        let atlas_bg_vsh_code = std::fs::read("resources/atlas_bg/vsh.fxc").unwrap();
+        unsafe {
+            init.subsystem
+                .d3d11_device
+                .CreateVertexShader(&atlas_bg_vsh_code, None, Some(atlas_bg_vsh.as_mut_ptr()))
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreatePixelShader(
+                    &std::fs::read("resources/atlas_bg/psh.fxc").unwrap(),
+                    None,
+                    Some(atlas_bg_psh.as_mut_ptr()),
+                )
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreateInputLayout(
+                    &[D3D11_INPUT_ELEMENT_DESC {
+                        SemanticName: s!("POSITION"),
+                        SemanticIndex: 0,
+                        Format: DXGI_FORMAT_R32G32_FLOAT,
+                        InputSlot: 0,
+                        AlignedByteOffset: 0,
+                        InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                        InstanceDataStepRate: 0,
+                    }],
+                    &atlas_bg_vsh_code,
+                    Some(atlas_bg_input_layout.as_mut_ptr()),
+                )
+                .unwrap();
+            init.subsystem
+                .d3d11_device
+                .CreateBuffer(
+                    &D3D11_BUFFER_DESC {
+                        ByteWidth: (core::mem::size_of::<[f32; 2]>() * 4) as _,
+                        Usage: D3D11_USAGE_DEFAULT,
+                        BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as _,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                        StructureByteStride: core::mem::size_of::<[f32; 2]>() as _,
+                    },
+                    Some(&D3D11_SUBRESOURCE_DATA {
+                        pSysMem: atlas_bg_vertices.as_ptr() as _,
+                        SysMemPitch: 0,
+                        SysMemSlicePitch: 0,
+                    }),
+                    Some(atlas_bg_vb.as_mut_ptr()),
+                )
+                .unwrap();
+        }
+        let atlas_bg_vsh = unsafe { atlas_bg_vsh.assume_init().unwrap() };
+        let atlas_bg_psh = unsafe { atlas_bg_psh.assume_init().unwrap() };
+        let atlas_bg_input_layout = unsafe { atlas_bg_input_layout.assume_init().unwrap() };
+        let atlas_bg_vb = unsafe { atlas_bg_vb.assume_init().unwrap() };
+
         let mut texture_preview_vb = core::mem::MaybeUninit::uninit();
         unsafe {
             init.subsystem
@@ -797,6 +863,12 @@ impl AtlasBaseGridView {
                 count: 0,
                 is_dirty: false,
             }),
+            atlas_bg_vsh,
+            atlas_bg_psh,
+            atlas_bg_input_layout,
+            atlas_bg_vb,
+            atlas_bg_vertices: RwLock::new(atlas_bg_vertices),
+            atlas_bg_vertices_dirty: RwLock::new(false),
             tex_sampler,
             size_pixels: RwLock::new((init_width_pixels, init_height_pixels)),
             resize_order: RwLock::new(None),
@@ -835,6 +907,16 @@ impl AtlasBaseGridView {
             .unwrap();
 
         *self.resize_order.write() = Some((new_width_px, new_height_px));
+    }
+
+    pub fn set_atlas_size(&self, width_pixels: u32, height_pixels: u32) {
+        *self.atlas_bg_vertices.write() = [
+            [0.0, 0.0],
+            [width_pixels as _, 0.0],
+            [0.0, height_pixels as _],
+            [width_pixels as _, height_pixels as _],
+        ];
+        *self.atlas_bg_vertices_dirty.write() = true;
     }
 
     pub fn update_sprite_offset(&self, index: usize, left_pixels: f32, top_pixels: f32) {
@@ -1124,6 +1206,19 @@ impl AtlasBaseGridView {
         let sprite_instance_count = sprite_instance_buffer.count;
         drop(sprite_instance_buffer);
 
+        if core::mem::replace(&mut *self.atlas_bg_vertices_dirty.write(), false) {
+            unsafe {
+                self.d3d11_device_context.UpdateSubresource(
+                    &self.atlas_bg_vb,
+                    0,
+                    None,
+                    self.atlas_bg_vertices.data_ptr() as _,
+                    0,
+                    0,
+                );
+            }
+        }
+
         drop(c);
 
         let bb = unsafe { self.swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap() };
@@ -1154,6 +1249,7 @@ impl AtlasBaseGridView {
                 right: width_px as _,
                 bottom: height_px as _,
             }]));
+
             self.d3d11_device_context.VSSetShader(&self.vsh, None);
             self.d3d11_device_context.PSSetShader(&self.psh, None);
             self.d3d11_device_context
@@ -1161,6 +1257,26 @@ impl AtlasBaseGridView {
             self.d3d11_device_context
                 .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             self.d3d11_device_context.Draw(4, 0);
+
+            self.d3d11_device_context
+                .VSSetShader(&self.atlas_bg_vsh, None);
+            self.d3d11_device_context
+                .PSSetShader(&self.atlas_bg_psh, None);
+            self.d3d11_device_context
+                .VSSetConstantBuffers(0, Some(&[Some(self.render_params_cb.clone())]));
+            self.d3d11_device_context
+                .IASetInputLayout(&self.atlas_bg_input_layout);
+            self.d3d11_device_context
+                .IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            self.d3d11_device_context.IASetVertexBuffers(
+                0,
+                1,
+                Some([Some(self.atlas_bg_vb.clone())].as_ptr()),
+                Some([core::mem::size_of::<[f32; 2]>() as u32].as_ptr()),
+                Some([0u32].as_ptr()),
+            );
+            self.d3d11_device_context.Draw(4, 0);
+
             self.d3d11_device_context
                 .OMSetBlendState(&self.premul_blend_state, None, u32::MAX);
             self.d3d11_device_context
@@ -1198,6 +1314,7 @@ impl AtlasBaseGridView {
             );
             self.d3d11_device_context
                 .DrawInstanced(4, sprite_instance_count as _, 0, 0);
+
             /*self.d3d11_device_context
                 .VSSetShader(&self.texture_preview_vsh, None);
             self.d3d11_device_context
@@ -3077,6 +3194,19 @@ impl Iterator for QuadTreeElementIndexIter<'_> {
     }
 }
 
+/// ビットを一つおきに分散させる
+/// 例: 0b11000110 => 0b01_01_00_00_00_01_01_00
+const fn interleave(bits: u64) -> u64 {
+    let bits = (bits | (bits << 32)) & 0xffff_ffff_ffff_ffff;
+    let bits = (bits | (bits << 16)) & 0x0000_ffff_0000_ffff;
+    let bits = (bits | (bits << 8)) & 0x00ff_00ff_00ff_00ff;
+    let bits = (bits | (bits << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+    let bits = (bits | (bits << 2)) & 0x3333_3333_3333_3333;
+    let bits = (bits | (bits << 1)) & 0x5555_5555_5555_5555;
+
+    bits
+}
+
 // http://marupeke296.com/COL_2D_No8_QuadTree.html だいたいこれの実装
 pub struct QuadTree {
     pub element_index_for_region: Vec<Vec<HashSet<usize>>>,
@@ -3113,17 +3243,6 @@ impl QuadTree {
         }
     }
 
-    const fn interleave(bits: u64) -> u64 {
-        let bits = (bits | (bits << 32)) & 0xffff_ffff_ffff_ffff;
-        let bits = (bits | (bits << 16)) & 0x0000_ffff_0000_ffff;
-        let bits = (bits | (bits << 8)) & 0x00ff_00ff_00ff_00ff;
-        let bits = (bits | (bits << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
-        let bits = (bits | (bits << 2)) & 0x3333_3333_3333_3333;
-        let bits = (bits | (bits << 1)) & 0x5555_5555_5555_5555;
-
-        bits
-    }
-
     pub const fn compute_location_index(location_x_pixels: u32, location_y_pixels: u32) -> u64 {
         // 一旦一律16(2^4)px角まで分割する
         let (xv, yv) = (
@@ -3135,7 +3254,7 @@ impl QuadTree {
         assert!(xv.leading_zeros() >= 32, "too many divisions!");
         assert!(yv.leading_zeros() >= 32, "too many divisions!");
 
-        Self::interleave(xv) | (Self::interleave(yv) << 1)
+        interleave(xv) | (interleave(yv) << 1)
     }
 
     pub const fn rect_index_and_level(
@@ -3635,14 +3754,20 @@ impl AppWindowPresenter {
             .borrow_mut()
             .register_atlas_size_view_feedback({
                 let border_view = Rc::downgrade(&sprite_atlas_border_view);
+                let grid_view = Arc::downgrade(&grid_view);
 
                 move |size| {
                     let Some(border_view) = border_view.upgrade() else {
                         // parent teardown-ed
                         return;
                     };
+                    let Some(grid_view) = grid_view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
 
                     border_view.set_size(*size);
+                    grid_view.set_atlas_size(size.width, size.height);
                 }
             });
 
