@@ -3,4 +3,6 @@
 /.nuget
 *.fxc
 *.ttc
+*.ttf
+*.svg
 /local

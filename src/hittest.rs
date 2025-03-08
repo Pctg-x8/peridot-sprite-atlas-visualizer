@@ -8,6 +8,11 @@ pub trait HitTestTreeActionHandler {
     type Context;
 
     #[allow(unused_variables)]
+    fn hit_active(&self, sender: HitTestTreeRef, context: &Self::Context) -> bool {
+        true
+    }
+
+    #[allow(unused_variables)]
     fn cursor(&self, sender: HitTestTreeRef, context: &mut Self::Context) -> Option<HCURSOR> {
         None
     }
@@ -263,6 +268,7 @@ impl<ActionContext> HitTestTreeManager<ActionContext> {
 
     pub fn perform_test(
         &self,
+        context: &ActionContext,
         x: HitTestTreeRef,
         global_x: f32,
         global_y: f32,
@@ -272,6 +278,16 @@ impl<ActionContext> HitTestTreeManager<ActionContext> {
         parent_global_height: f32,
     ) -> Option<HitTestTreeRef> {
         let e = &self.entities[x.0];
+        if !e
+            .action_handler
+            .as_ref()
+            .and_then(|e| e.upgrade())
+            .map_or(true, |e| e.hit_active(x, context))
+        {
+            // ヒットしない
+            return None;
+        }
+
         let (global_left, global_top, global_width, global_height) = (
             parent_global_left + e.left_adjustment_factor * parent_global_width + e.left,
             parent_global_top + parent_global_height * e.top_adjustment_factor + e.top,
@@ -284,6 +300,7 @@ impl<ActionContext> HitTestTreeManager<ActionContext> {
         // 後ろにある方が上なのでそれを優先して見る
         if let Some(h) = e.children.iter().rev().find_map(|&x| {
             self.perform_test(
+                context,
                 x,
                 global_x,
                 global_y,

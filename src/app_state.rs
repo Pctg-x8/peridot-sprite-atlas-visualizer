@@ -1,9 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::coordinate::SizePixels;
+use uuid::Uuid;
+
+use crate::{coordinate::SizePixels, peridot};
 
 #[derive(Debug)]
 pub struct SpriteInfo {
+    // immutable
+    id: Uuid,
     pub name: String,
     pub source_path: PathBuf,
     pub width: u32,
@@ -17,6 +21,27 @@ pub struct SpriteInfo {
     pub selected: bool,
 }
 impl SpriteInfo {
+    pub fn new(name: String, source_path: PathBuf, width: u32, height: u32) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name,
+            source_path,
+            width,
+            height,
+            left: 0,
+            top: 0,
+            left_slice: 0,
+            right_slice: 0,
+            top_slice: 0,
+            bottom_slice: 0,
+            selected: false,
+        }
+    }
+
+    pub const fn id(&self) -> &Uuid {
+        &self.id
+    }
+
     pub const fn right(&self) -> u32 {
         self.left + self.width
     }
@@ -31,6 +56,8 @@ pub struct AppState {
     atlas_size_view_feedbacks: Vec<Box<dyn FnMut(&SizePixels)>>,
     sprites: Vec<SpriteInfo>,
     sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
+    visible_menu: bool,
+    visible_menu_view_feedbacks: Vec<Box<dyn FnMut(bool, bool)>>,
 }
 impl AppState {
     pub fn new() -> Self {
@@ -42,6 +69,8 @@ impl AppState {
             atlas_size_view_feedbacks: Vec::new(),
             sprites: Vec::new(),
             sprites_view_feedbacks: Vec::new(),
+            visible_menu: false,
+            visible_menu_view_feedbacks: Vec::new(),
         }
     }
 
@@ -123,6 +152,49 @@ impl AppState {
         }
     }
 
+    pub fn toggle_menu(&mut self) {
+        self.visible_menu = !self.visible_menu;
+
+        for cb in self.visible_menu_view_feedbacks.iter_mut() {
+            cb(self.visible_menu, false);
+        }
+    }
+
+    pub const fn is_visible_menu(&self) -> bool {
+        self.visible_menu
+    }
+
+    pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        let mut asset = peridot::SpriteAtlasAsset {
+            sprites: self
+                .sprites
+                .iter()
+                .map(|x| peridot::Sprite {
+                    id: x.id.clone(),
+                    source_path: x.source_path.clone(),
+                    name: x.name.clone(),
+                    width: x.width,
+                    height: x.height,
+                    left: x.left,
+                    top: x.top,
+                    border_left: x.left_slice,
+                    border_top: x.top_slice,
+                    border_right: x.right_slice,
+                    border_bottom: x.bottom_slice,
+                })
+                .collect(),
+        };
+        asset.sprites.sort_by(|a, b| a.id.cmp(&b.id));
+
+        asset.write(
+            &mut std::fs::File::options()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)?,
+        )
+    }
+
     // TODO: unregister
     pub fn register_sprites_view_feedback(&mut self, mut fb: impl FnMut(&[SpriteInfo]) + 'static) {
         fb(&self.sprites);
@@ -133,5 +205,14 @@ impl AppState {
     pub fn register_atlas_size_view_feedback(&mut self, mut fb: impl FnMut(&SizePixels) + 'static) {
         fb(&self.atlas_size);
         self.atlas_size_view_feedbacks.push(Box::new(fb));
+    }
+
+    // TODO: unregister
+    pub fn register_visible_menu_view_feedback(
+        &mut self,
+        mut fb: impl FnMut(bool, bool) + 'static,
+    ) {
+        fb(self.visible_menu, true);
+        self.visible_menu_view_feedbacks.push(Box::new(fb));
     }
 }

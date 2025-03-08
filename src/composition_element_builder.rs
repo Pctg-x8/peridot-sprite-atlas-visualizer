@@ -173,6 +173,20 @@ macro_rules! CoordinateElementFunctions {
         }
 
         #[allow(dead_code)]
+        pub const fn top(mut self, top: f32) -> Self {
+            self.offset = Some(match self.offset {
+                None => Vector3 {
+                    X: 0.0,
+                    Y: top,
+                    Z: 0.0,
+                },
+                Some(x) => Vector3 { Y: top, ..x },
+            });
+
+            self
+        }
+
+        #[allow(dead_code)]
         pub const fn relative_offset_adjustment(mut self, adjustment: Vector3) -> Self {
             self.relative_offset_adjustment = Some(adjustment);
             self

@@ -63,9 +63,14 @@ impl IDWriteFontFileEnumerator_Impl for AppFontFileEnumerator_Impl {
     fn GetCurrentFontFile(
         &self,
     ) -> windows_core::Result<windows::Win32::Graphics::DirectWrite::IDWriteFontFile> {
-        unsafe {
-            self.factory
-                .CreateFontFileReference(w!("./resources/inter.ttc"), None)
+        match self.ptr.get() {
+            1 => unsafe {
+                self.factory
+                    .CreateFontFileReference(w!("./resources/inter.ttc"), None)
+            },
+            _ => Err(windows_core::Error::from_hresult(
+                windows::Win32::Foundation::E_FAIL,
+            )),
         }
     }
 

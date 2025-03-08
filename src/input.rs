@@ -88,6 +88,7 @@ impl PointerInputManager {
         }
 
         let new_hit = ht.perform_test(
+            action_context,
             ht_root,
             client_x,
             client_y,

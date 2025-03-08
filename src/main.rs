@@ -15,10 +15,11 @@ use bg_worker::{
     BackgroundWorkerEnqueueWeakAccess, BackgroundWorkerViewFeedback,
 };
 use color_factory::{
-    d2d1_color_f_from_hex_rgb, d2d1_color_f_from_websafe_hex_rgb, ui_color_from_hex_rgb,
+    d2d1_color_f_from_hex_argb, d2d1_color_f_from_hex_rgb, d2d1_color_f_from_websafe_hex_argb,
+    d2d1_color_f_from_websafe_hex_rgb, ui_color_from_hex_rgb,
     ui_color_from_websafe_hex_rgb_with_alpha,
 };
-use component::{app_header::AppHeaderView, dnd_overlay::FileDragAndDropOverlayView};
+use component::{app_header::AppHeaderPresenter, dnd_overlay::FileDragAndDropOverlayView};
 use composition_element_builder::{
     CompositionMaskBrushParams, CompositionNineGridBrushParams, CompositionSurfaceBrushParams,
     ContainerVisualParams, SimpleImplicitAnimationParams, SimpleScalarAnimationParams,
@@ -40,6 +41,10 @@ use timespan_helper::timespan_ms;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
+    Storage::{
+        FileAccessMode,
+        Streams::{IRandomAccessStream, RandomAccessStream},
+    },
     UI::{
         Color,
         Composition::{
@@ -54,8 +59,12 @@ use windows::{
         Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM},
         Graphics::{
             Direct2D::{
-                Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F},
-                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1Multithread,
+                Common::{
+                    D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+                    D2D1_FIGURE_END_CLOSED,
+                },
+                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, D2D1_TRIANGLE,
+                ID2D1DeviceContext5, ID2D1Multithread,
             },
             Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             Direct3D11::{
@@ -90,8 +99,8 @@ use windows::{
         Storage::Packaging::Appx::PACKAGE_VERSION,
         System::{
             Com::{
-                CLSCTX_INPROC_SERVER, CoCreateInstance, DVASPECT_CONTENT, FORMATETC, STGMEDIUM,
-                TYMED_HGLOBAL,
+                CLSCTX_INPROC_SERVER, CoCreateInstance, DVASPECT_CONTENT, FORMATETC, IStream,
+                STGMEDIUM, TYMED_HGLOBAL,
             },
             LibraryLoader::GetModuleHandleW,
             Memory::{GlobalLock, GlobalUnlock},
@@ -101,7 +110,8 @@ use windows::{
             },
             Threading::{INFINITE, WaitForMultipleObjectsEx},
             WinRT::{
-                CreateDispatcherQueueController, DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT,
+                CreateDispatcherQueueController, CreateRandomAccessStreamOnFile,
+                CreateStreamOverRandomAccessStream, DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT,
                 DispatcherQueueOptions,
             },
         },
@@ -139,6 +149,7 @@ mod extra_bindings;
 mod hittest;
 mod input;
 mod native_wrapper;
+mod peridot;
 mod source_reader;
 mod subsystem;
 mod surface_helper;
@@ -3148,6 +3159,609 @@ impl SpriteListPanePresenter {
     }
 }
 
+struct AppMenuView {
+    root: ContainerVisual,
+    window_root: ContainerVisual,
+    composition_params: CompositionPropertySet,
+    show_animation: ScalarKeyFrameAnimation,
+    hide_animation: ScalarKeyFrameAnimation,
+    ht_root: HitTestTreeRef,
+    top_offset: Cell<f32>,
+    dpi: Cell<f32>,
+}
+impl AppMenuView {
+    const CORNER_RADIUS: f32 = 8.0;
+    const BEAK_SIZE: f32 = 8.0;
+    const BEAK_LEFT_OFFSET: f32 = 8.0;
+    const FRAME_BASE_COLOR: windows::UI::Color =
+        ui_color_from_websafe_hex_rgb_with_alpha(0xfff, 64);
+    const MASK_COLOR: windows::UI::Color = ui_color_from_websafe_hex_rgb_with_alpha(0x000, 128);
+
+    pub fn new(init: &mut ViewInitContext, top_offset: f32) -> Self {
+        let beak_path = unsafe { init.subsystem.d2d1_factory.CreatePathGeometry().unwrap() };
+        let beak_path_sink = unsafe { beak_path.Open().unwrap() };
+        unsafe {
+            beak_path_sink.BeginFigure(
+                D2D_POINT_2F {
+                    x: 0.0,
+                    y: Self::BEAK_SIZE,
+                },
+                D2D1_FIGURE_BEGIN_FILLED,
+            );
+            beak_path_sink.AddLines(&[
+                D2D_POINT_2F {
+                    x: Self::BEAK_SIZE,
+                    y: 0.0,
+                },
+                D2D_POINT_2F {
+                    x: Self::BEAK_SIZE * 2.0,
+                    y: Self::BEAK_SIZE,
+                },
+            ]);
+            beak_path_sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            beak_path_sink.Close().unwrap();
+            drop(beak_path_sink);
+        }
+
+        let beak_mask_surface = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: init.dip_to_pixels(Self::BEAK_SIZE * 2.0),
+                Height: init.dip_to_pixels(Self::BEAK_SIZE),
+            })
+            .unwrap();
+        draw_2d(&beak_mask_surface, |dc, offset| {
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
+            }
+
+            unsafe {
+                dc.Clear(None);
+                dc.FillGeometry(
+                    &beak_path,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
+                    None,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        let frame_mask_surface = init
+            .subsystem
+            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(Self::CORNER_RADIUS * 2.0 + 1.0)))
+            .unwrap();
+        draw_2d(&frame_mask_surface, |dc, offset| {
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
+
+                dc.Clear(None);
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: Self::CORNER_RADIUS * 2.0 + 1.0,
+                            bottom: Self::CORNER_RADIUS * 2.0 + 1.0,
+                        },
+                        radiusX: Self::CORNER_RADIUS,
+                        radiusY: Self::CORNER_RADIUS,
+                    },
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        let window_base_brush = create_instant_effect_brush(
+            &init.subsystem,
+            &CompositeEffectParams::new(&[
+                GaussianBlurEffectParams::new(
+                    &CompositionEffectSourceParameter::Create(h!("source")).unwrap(),
+                )
+                .blur_amount_px(9.0)
+                .instantiate()
+                .unwrap()
+                .cast()
+                .unwrap(),
+                ColorSourceEffectParams {
+                    color: Some(Self::FRAME_BASE_COLOR),
+                }
+                .instantiate()
+                .unwrap()
+                .cast()
+                .unwrap(),
+            ])
+            .instantiate()
+            .unwrap(),
+            &[(
+                h!("source"),
+                init.subsystem
+                    .compositor
+                    .CreateBackdropBrush()
+                    .unwrap()
+                    .cast()
+                    .unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let root = ContainerVisualParams::new()
+            .expand()
+            .top(init.dip_to_pixels(top_offset))
+            .height(init.dip_to_pixels(-top_offset))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let mask = SpriteVisualParams::new(
+            &init
+                .subsystem
+                .compositor
+                .CreateColorBrushWithColor(Self::MASK_COLOR)
+                .unwrap(),
+        )
+        .expand()
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let window_root = ContainerVisualParams::new()
+            .size_sq(init.dip_to_pixels(128.0))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let beak = SpriteVisualParams::new(
+            &CompositionMaskBrushParams {
+                source: &window_base_brush,
+                mask: &CompositionSurfaceBrushParams::new(&beak_mask_surface)
+                    .instantiate(&init.subsystem.compositor)
+                    .unwrap(),
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+        )
+        .size(Vector2 {
+            X: init.dip_to_pixels(Self::BEAK_SIZE * 2.0),
+            Y: init.dip_to_pixels(Self::BEAK_SIZE),
+        })
+        .offset_xy(Vector2 {
+            X: init.dip_to_pixels(Self::BEAK_LEFT_OFFSET),
+            Y: init.dip_to_pixels(-Self::BEAK_SIZE),
+        })
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let window_frame = SpriteVisualParams::new(
+            &CompositionMaskBrushParams {
+                source: &window_base_brush,
+                mask: &CompositionNineGridBrushParams::new(
+                    &CompositionSurfaceBrushParams::new(&frame_mask_surface)
+                        .stretch(CompositionStretch::Fill)
+                        .instantiate(&init.subsystem.compositor)
+                        .unwrap(),
+                )
+                .insets(init.dip_to_pixels(Self::CORNER_RADIUS))
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+            }
+            .instantiate(&init.subsystem.compositor)
+            .unwrap(),
+        )
+        .expand()
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        window_root.Children().unwrap().InsertAtTop(&beak).unwrap();
+        window_root
+            .Children()
+            .unwrap()
+            .InsertAtTop(&window_frame)
+            .unwrap();
+
+        root.Children().unwrap().InsertAtTop(&mask).unwrap();
+        root.Children().unwrap().InsertAtTop(&window_root).unwrap();
+
+        let composition_params = init.subsystem.compositor.CreatePropertySet().unwrap();
+        composition_params
+            .InsertScalar(h!("VisibleRate"), 0.0)
+            .unwrap();
+        composition_params
+            .InsertVector2(h!("WindowOffset"), Vector2 { X: 0.0, Y: 0.0 })
+            .unwrap();
+        composition_params
+            .InsertScalar(h!("DPI"), init.dpi)
+            .unwrap();
+
+        let opacity_expression = init
+            .subsystem
+            .compositor
+            .CreateExpressionAnimationWithExpression(h!("cp.VisibleRate"))
+            .unwrap();
+        opacity_expression
+            .SetExpressionReferenceParameter(h!("cp"), &composition_params)
+            .unwrap();
+        opacity_expression.SetTarget(h!("Opacity")).unwrap();
+        mask.StartAnimation(h!("Opacity"), &opacity_expression)
+            .unwrap();
+        window_root
+            .StartAnimation(h!("Opacity"), &opacity_expression)
+            .unwrap();
+
+        let window_offset_expression = init
+            .subsystem
+            .compositor
+            .CreateExpressionAnimationWithExpression(h!(
+                "Vector3(cp.WindowOffset.X, cp.WindowOffset.Y - (16.0 * (1.0 - cp.VisibleRate) * cp.DPI / 96.0), 0.0)"
+            ))
+            .unwrap();
+        window_offset_expression
+            .SetExpressionReferenceParameter(h!("cp"), &composition_params)
+            .unwrap();
+        window_offset_expression.SetTarget(h!("Offset")).unwrap();
+        window_root
+            .StartAnimation(h!("Offset"), &window_offset_expression)
+            .unwrap();
+
+        let easing = init
+            .subsystem
+            .compositor
+            .CreateCubicBezierEasingFunction(
+                Vector2 { X: 0.0, Y: 0.0 },
+                Vector2 { X: 0.25, Y: 1.0 },
+            )
+            .unwrap();
+        let show_animation = SimpleScalarAnimationParams::new(0.0, 1.0, &easing)
+            .duration(timespan_ms(200))
+            .target(h!("VisibleRate"))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let hide_animation = SimpleScalarAnimationParams::new(1.0, 0.0, &easing)
+            .duration(timespan_ms(200))
+            .target(h!("VisibleRate"))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+
+        let ht_root = init.ht.borrow_mut().alloc(HitTestTreeData {
+            left: 0.0,
+            top: top_offset,
+            left_adjustment_factor: 0.0,
+            top_adjustment_factor: 0.0,
+            width: 0.0,
+            height: -top_offset,
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 1.0,
+            parent: None,
+            children: Vec::new(),
+            action_handler: None,
+        });
+
+        let icon_svg_stream: IRandomAccessStream = unsafe {
+            CreateRandomAccessStreamOnFile(
+                w!("./resources/file_open.svg"),
+                FileAccessMode::Read.0 as _,
+            )
+            .unwrap()
+        };
+        let icon_svg_stream: IStream =
+            unsafe { CreateStreamOverRandomAccessStream(&icon_svg_stream).unwrap() };
+        let icon_surface = init
+            .subsystem
+            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(20.0)))
+            .unwrap();
+        draw_2d(&icon_surface, |dc, offset| {
+            let dc5: ID2D1DeviceContext5 = dc.cast()?;
+
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
+            }
+
+            let svg = unsafe {
+                dc5.CreateSvgDocument(
+                    &icon_svg_stream,
+                    D2D_SIZE_F {
+                        width: pixels_to_dip(20, init.dpi),
+                        height: pixels_to_dip(20, init.dpi),
+                    },
+                )?
+            };
+
+            unsafe {
+                dc.Clear(None);
+                dc5.DrawSvgDocument(&svg);
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        let open_cell = ContainerVisualParams::new()
+            .expand_width()
+            .height(init.dip_to_pixels(20.0))
+            .offset_xy(Vector2 {
+                X: init.dip_to_pixels(0.0),
+                Y: init.dip_to_pixels(Self::CORNER_RADIUS),
+            })
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let icon = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&icon_surface)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .size_sq(init.dip_to_pixels(20.0))
+        .left(init.dip_to_pixels(Self::CORNER_RADIUS))
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let cell_label_layout = init
+            .subsystem
+            .new_text_layout_unrestricted("開く", &init.subsystem.default_ui_format)
+            .unwrap();
+        let mut cell_label_metrics = MaybeUninit::uninit();
+        unsafe {
+            cell_label_layout
+                .GetMetrics(cell_label_metrics.as_mut_ptr())
+                .unwrap();
+        }
+        let cell_label_metrics = unsafe { cell_label_metrics.assume_init() };
+        let cell_label = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: init.dip_to_pixels(cell_label_metrics.width),
+                Height: init.dip_to_pixels(cell_label_metrics.height),
+            })
+            .unwrap();
+        draw_2d(&cell_label, |dc, offset| {
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x),
+                        y: init.signed_pixels_to_dip(offset.y),
+                    },
+                    &cell_label_layout,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+        let cell_label = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&cell_label)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .anchor_point(Vector2 { X: 0.0, Y: 0.5 })
+        .relative_offset_adjustment_xy(Vector2 { X: 0.0, Y: 0.5 })
+        .offset_xy(Vector2 {
+            X: init.dip_to_pixels(Self::CORNER_RADIUS + 20.0 + 4.0),
+            Y: 0.0,
+        })
+        .size(Vector2 {
+            X: init.dip_to_pixels(cell_label_metrics.width),
+            Y: init.dip_to_pixels(cell_label_metrics.height),
+        })
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let icon_svg_stream: IRandomAccessStream = unsafe {
+            CreateRandomAccessStreamOnFile(
+                w!("./resources/file_save.svg"),
+                FileAccessMode::Read.0 as _,
+            )
+            .unwrap()
+        };
+        let icon_svg_stream: IStream =
+            unsafe { CreateStreamOverRandomAccessStream(&icon_svg_stream).unwrap() };
+        let icon_surface = init
+            .subsystem
+            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(20.0)))
+            .unwrap();
+        draw_2d(&icon_surface, |dc, offset| {
+            let dc5: ID2D1DeviceContext5 = dc.cast()?;
+
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
+            }
+
+            let svg = unsafe {
+                dc5.CreateSvgDocument(
+                    &icon_svg_stream,
+                    D2D_SIZE_F {
+                        width: pixels_to_dip(20, init.dpi),
+                        height: pixels_to_dip(20, init.dpi),
+                    },
+                )?
+            };
+
+            unsafe {
+                dc.Clear(None);
+                dc5.DrawSvgDocument(&svg);
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        open_cell.Children().unwrap().InsertAtTop(&icon).unwrap();
+        open_cell
+            .Children()
+            .unwrap()
+            .InsertAtTop(&cell_label)
+            .unwrap();
+
+        let save_cell = ContainerVisualParams::new()
+            .expand_width()
+            .height(init.dip_to_pixels(20.0))
+            .offset_xy(Vector2 {
+                X: init.dip_to_pixels(0.0),
+                Y: init.dip_to_pixels(Self::CORNER_RADIUS + 24.0),
+            })
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let icon = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&icon_surface)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .size_sq(init.dip_to_pixels(20.0))
+        .left(init.dip_to_pixels(Self::CORNER_RADIUS))
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let cell_label_layout = init
+            .subsystem
+            .new_text_layout_unrestricted("保存", &init.subsystem.default_ui_format)
+            .unwrap();
+        let mut cell_label_metrics = MaybeUninit::uninit();
+        unsafe {
+            cell_label_layout
+                .GetMetrics(cell_label_metrics.as_mut_ptr())
+                .unwrap();
+        }
+        let cell_label_metrics = unsafe { cell_label_metrics.assume_init() };
+        let cell_label = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: init.dip_to_pixels(cell_label_metrics.width),
+                Height: init.dip_to_pixels(cell_label_metrics.height),
+            })
+            .unwrap();
+        draw_2d(&cell_label, |dc, offset| {
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x),
+                        y: init.signed_pixels_to_dip(offset.y),
+                    },
+                    &cell_label_layout,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+        let cell_label = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&cell_label)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .anchor_point(Vector2 { X: 0.0, Y: 0.5 })
+        .relative_offset_adjustment_xy(Vector2 { X: 0.0, Y: 0.5 })
+        .offset_xy(Vector2 {
+            X: init.dip_to_pixels(Self::CORNER_RADIUS + 20.0 + 4.0),
+            Y: 0.0,
+        })
+        .size(Vector2 {
+            X: init.dip_to_pixels(cell_label_metrics.width),
+            Y: init.dip_to_pixels(cell_label_metrics.height),
+        })
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        save_cell.Children().unwrap().InsertAtTop(&icon).unwrap();
+        save_cell
+            .Children()
+            .unwrap()
+            .InsertAtTop(&cell_label)
+            .unwrap();
+
+        window_root
+            .Children()
+            .unwrap()
+            .InsertAtTop(&open_cell)
+            .unwrap();
+        window_root
+            .Children()
+            .unwrap()
+            .InsertAtTop(&save_cell)
+            .unwrap();
+
+        Self {
+            root,
+            window_root,
+            composition_params,
+            show_animation,
+            hide_animation,
+            ht_root,
+            top_offset: Cell::new(top_offset),
+            dpi: Cell::new(init.dpi),
+        }
+    }
+
+    pub fn mount(
+        &self,
+        children: &VisualCollection,
+        ht: &mut AppHitTestTreeManager,
+        ht_parent: HitTestTreeRef,
+    ) {
+        children.InsertAtTop(&self.root).unwrap();
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn set_window_offset_by_beak_peak(&self, peak_x: f32, peak_y: f32) {
+        let dpi = self.dpi.get();
+        let top_offset = self.top_offset.get();
+
+        self.composition_params
+            .InsertVector2(
+                h!("WindowOffset"),
+                Vector2 {
+                    X: dip_to_pixels(peak_x - Self::BEAK_LEFT_OFFSET - Self::BEAK_SIZE, dpi),
+                    Y: dip_to_pixels(peak_y + Self::BEAK_SIZE - top_offset, dpi),
+                },
+            )
+            .unwrap();
+    }
+
+    pub fn show(&self, immediate: bool) {
+        if immediate {
+            self.composition_params
+                .InsertScalar(h!("VisibleRate"), 1.0)
+                .unwrap();
+        } else {
+            self.composition_params
+                .StartAnimation(h!("VisibleRate"), &self.show_animation)
+                .unwrap();
+        }
+    }
+
+    pub fn hide(&self, immediate: bool) {
+        if immediate {
+            self.composition_params
+                .InsertScalar(h!("VisibleRate"), 0.0)
+                .unwrap();
+        } else {
+            self.composition_params
+                .StartAnimation(h!("VisibleRate"), &self.hide_animation)
+                .unwrap();
+        }
+    }
+}
+
 pub struct QuadTreeElementIndexIter<'a> {
     qt: &'a QuadTree,
     index: u64,
@@ -3304,6 +3918,7 @@ struct AppWindowHitTestTreeActionHandler {
     grid_view: Arc<AtlasBaseGridView>,
     sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
+    menu_view: Rc<AppMenuView>,
     qt: RefCell<QuadTree>,
     sprite_rect_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
     drag_data: RefCell<DragState>,
@@ -3313,6 +3928,15 @@ struct AppWindowHitTestTreeActionHandler {
 impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     type Context = AppState;
 
+    fn hit_active(&self, sender: HitTestTreeRef, context: &Self::Context) -> bool {
+        if sender == self.menu_view.ht_root && !context.is_visible_menu() {
+            // AppMenuが表示されていないときはAppMenuのヒットテストを無効化する
+            return false;
+        }
+
+        true
+    }
+
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
@@ -3321,6 +3945,10 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
+        if sender == self.menu_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.ht_root {
             let dpi = self.dpi.get();
             let (current_offset_x, current_offset_y) = *self.grid_view.offset_pixels.read();
@@ -3373,6 +4001,10 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         _client_width: f32,
         _client_height: f32,
     ) -> EventContinueControl {
+        if sender == self.menu_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.ht_root {
             match &*self.drag_data.borrow() {
                 DragState::None => {}
@@ -3431,6 +4063,10 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         client_x: f32,
         client_y: f32,
     ) -> EventContinueControl {
+        if sender == self.menu_view.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.ht_root {
             match core::mem::replace(&mut *self.drag_data.borrow_mut(), DragState::None) {
                 DragState::None => {}
@@ -3499,6 +4135,11 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         _client_width: f32,
         _client_height: f32,
     ) -> EventContinueControl {
+        if sender == self.menu_view.ht_root {
+            context.toggle_menu();
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
         if sender == self.ht_root {
             let dpi = self.dpi.get();
             let x = dip_to_pixels(client_x, dpi) + self.grid_view.offset_pixels.read().0;
@@ -3546,7 +4187,8 @@ struct AppWindowPresenter {
     _sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     _selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     sprite_list_pane: SpriteListPanePresenter,
-    header_view: AppHeaderView,
+    header: AppHeaderPresenter,
+    _menu_view: Rc<AppMenuView>,
     file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
     _ht_action_handler: Rc<AppWindowHitTestTreeActionHandler>,
     _dpi_handler: Rc<AppWindowDpiHandler>,
@@ -3597,13 +4239,18 @@ impl AppWindowPresenter {
 
         let sprite_list_pane = SpriteListPanePresenter::new(init);
 
-        let header_view =
-            AppHeaderView::new(&mut init.for_view, "Peridot SpriteAtlas Visualizer/Editor");
+        let header = AppHeaderPresenter::new(init, "Peridot SpriteAtlas Visualizer/Editor");
+
+        let menu_view = Rc::new(AppMenuView::new(&mut init.for_view, header.height()));
+        menu_view.set_window_offset_by_beak_peak(
+            header.height() * 0.5,
+            header.height() * 0.5 + 6.0 + 2.0,
+        );
 
         let file_dnd_overlay = Rc::new(FileDragAndDropOverlayView::new(&mut init.for_view));
 
-        sprite_list_pane.set_top(&mut init.for_view.ht.borrow_mut(), header_view.height());
-        grid_view.set_offset(0.0, -init.for_view.dip_to_pixels(header_view.height()));
+        sprite_list_pane.set_top(&mut init.for_view.ht.borrow_mut(), header.height());
+        grid_view.set_offset(0.0, -init.for_view.dip_to_pixels(header.height()));
 
         root.Children().unwrap().InsertAtBottom(&bg).unwrap();
         grid_view.mount(&root.Children().unwrap());
@@ -3614,13 +4261,23 @@ impl AppWindowPresenter {
             &mut init.for_view.ht.borrow_mut(),
             ht_root,
         );
-        header_view.mount(&root.Children().unwrap());
+        header.mount(
+            &root.Children().unwrap(),
+            &mut init.for_view.ht.borrow_mut(),
+            ht_root,
+        );
+        menu_view.mount(
+            &root.Children().unwrap(),
+            &mut init.for_view.ht.borrow_mut(),
+            ht_root,
+        );
         file_dnd_overlay.mount(&root.Children().unwrap());
 
         let ht_action_handler = Rc::new(AppWindowHitTestTreeActionHandler {
             grid_view: grid_view.clone(),
             sprite_atlas_border_view: sprite_atlas_border_view.clone(),
             selected_sprite_marker_view: selected_sprite_marker_view.clone(),
+            menu_view: menu_view.clone(),
             qt: RefCell::new(QuadTree::new()),
             sprite_rect_cached: RefCell::new(Vec::new()),
             drag_data: RefCell::new(DragState::None),
@@ -3631,6 +4288,11 @@ impl AppWindowPresenter {
             .ht
             .borrow_mut()
             .get_mut(ht_root)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+        init.for_view
+            .ht
+            .borrow_mut()
+            .get_mut(menu_view.ht_root)
             .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
 
         let dpi_handler = Rc::new(AppWindowDpiHandler {
@@ -3770,6 +4432,24 @@ impl AppWindowPresenter {
                     grid_view.set_atlas_size(size.width, size.height);
                 }
             });
+        init.app_state
+            .borrow_mut()
+            .register_visible_menu_view_feedback({
+                let menu_view = Rc::downgrade(&menu_view);
+
+                move |visible, initial_fire| {
+                    let Some(menu_view) = menu_view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+
+                    if visible {
+                        menu_view.show(initial_fire);
+                    } else {
+                        menu_view.hide(initial_fire);
+                    }
+                }
+            });
 
         Self {
             root,
@@ -3778,7 +4458,8 @@ impl AppWindowPresenter {
             _sprite_atlas_border_view: sprite_atlas_border_view,
             _selected_sprite_marker_view: selected_sprite_marker_view,
             sprite_list_pane,
-            header_view,
+            header,
+            _menu_view: menu_view,
             file_dnd_overlay,
             _ht_action_handler: ht_action_handler,
             _dpi_handler: dpi_handler,
@@ -3906,7 +4587,7 @@ impl AppWindowStateModel {
         };
         let size = self.client_size_dip();
 
-        if let Some(ht) = self.root_presenter.header_view.nc_hittest(&p, &size) {
+        if let Some(ht) = self.root_presenter.header.nc_hittest(&p, &size) {
             return Some(LRESULT(ht as _));
         }
 
@@ -4100,37 +4781,23 @@ impl IDropTarget_Impl for DropTargetHandler_Impl {
                         continue;
                     };
 
-                    sprites.push(SpriteInfo {
-                        name: path.file_stem().unwrap().to_str().unwrap().into(),
-                        source_path: path.to_path_buf(),
-                        width: png_meta.width as _,
-                        height: png_meta.height as _,
-                        left: 0,
-                        top: 0,
-                        left_slice: 0,
-                        right_slice: 0,
-                        top_slice: 0,
-                        bottom_slice: 0,
-                        selected: false,
-                    });
+                    sprites.push(SpriteInfo::new(
+                        path.file_stem().unwrap().to_str().unwrap().into(),
+                        path.to_path_buf(),
+                        png_meta.width,
+                        png_meta.height,
+                    ));
                 }
             } else {
                 let mut fs = std::fs::File::open(&path).unwrap();
                 let png_meta = source_reader::png::Metadata::try_read(&mut fs).expect("not a png?");
 
-                sprites.push(SpriteInfo {
-                    name: path.file_stem().unwrap().to_str().unwrap().into(),
-                    source_path: path,
-                    width: png_meta.width as _,
-                    height: png_meta.height as _,
-                    left: 0,
-                    top: 0,
-                    left_slice: 0,
-                    right_slice: 0,
-                    top_slice: 0,
-                    bottom_slice: 0,
-                    selected: false,
-                });
+                sprites.push(SpriteInfo::new(
+                    path.file_stem().unwrap().to_str().unwrap().into(),
+                    path.to_path_buf(),
+                    png_meta.width,
+                    png_meta.height,
+                ));
             }
         }
         drop(glock);
