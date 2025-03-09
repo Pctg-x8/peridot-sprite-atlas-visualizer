@@ -15,9 +15,8 @@ use bg_worker::{
     BackgroundWorkerEnqueueWeakAccess, BackgroundWorkerViewFeedback,
 };
 use color_factory::{
-    d2d1_color_f_from_hex_argb, d2d1_color_f_from_hex_rgb, d2d1_color_f_from_websafe_hex_argb,
-    d2d1_color_f_from_websafe_hex_rgb, ui_color_from_hex_rgb,
-    ui_color_from_websafe_hex_rgb_with_alpha,
+    d2d1_color_f_from_hex_rgb, d2d1_color_f_from_websafe_hex_rgb, ui_color_from_hex_rgb,
+    ui_color_from_websafe_hex_rgb, ui_color_from_websafe_hex_rgb_with_alpha,
 };
 use component::{app_header::AppHeaderPresenter, dnd_overlay::FileDragAndDropOverlayView};
 use composition_element_builder::{
@@ -41,10 +40,7 @@ use timespan_helper::timespan_ms;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
-    Storage::{
-        FileAccessMode,
-        Streams::{IRandomAccessStream, RandomAccessStream},
-    },
+    Storage::{FileAccessMode, Streams::IRandomAccessStream},
     UI::{
         Color,
         Composition::{
@@ -63,8 +59,8 @@ use windows::{
                     D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_F, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
                     D2D1_FIGURE_END_CLOSED,
                 },
-                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, D2D1_TRIANGLE,
-                ID2D1DeviceContext5, ID2D1Multithread,
+                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1DeviceContext5,
+                ID2D1Multithread,
             },
             Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             Direct3D11::{
@@ -2336,43 +2332,11 @@ impl SpriteListPaneView {
         bottom: 16.0,
     };
 
-    fn gen_frame_tex(subsystem: &Subsystem, dpi: f32) -> CompositionDrawingSurface {
-        let s = subsystem
-            .new_2d_drawing_surface(size_sq(dip_to_pixels(Self::FRAME_TEX_SIZE, dpi)))
-            .unwrap();
-        draw_2d(&s, |dc, offset| {
-            unsafe {
-                dc.SetDpi(dpi, dpi);
-                dc.SetTransform(&Matrix3x2::translation(
-                    signed_pixels_to_dip(offset.x, dpi),
-                    signed_pixels_to_dip(offset.y, dpi),
-                ));
-
-                dc.Clear(None);
-                dc.FillRoundedRectangle(
-                    &D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: 0.0,
-                            top: 0.0,
-                            right: Self::FRAME_TEX_SIZE,
-                            bottom: Self::FRAME_TEX_SIZE,
-                        },
-                        radiusX: Self::CORNER_RADIUS,
-                        radiusY: Self::CORNER_RADIUS,
-                    },
-                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
-                );
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-
-        s
-    }
-
     pub fn new(init: &mut ViewInitContext) -> Self {
-        let frame_surface = Self::gen_frame_tex(init.subsystem, init.dpi);
+        let frame_surface = init
+            .subsystem
+            .rounded_rect_mask_surface(init.dpi, Self::CORNER_RADIUS)
+            .unwrap();
 
         let root = ContainerVisualParams::new()
             .left(init.dip_to_pixels(8.0))
@@ -2760,10 +2724,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         _context: &mut AppState,
         ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -2778,10 +2739,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         if sender == self.view.ht_cell_area {
             let (_, local_y, _, _) = ht.translate_client_to_tree_local(
                 sender,
-                client_x,
-                client_y,
-                client_width,
-                client_height,
+                args.client_x,
+                args.client_y,
+                args.client_width,
+                args.client_height,
             );
 
             let index = (local_y / SpriteListCellView::CELL_HEIGHT).trunc();
@@ -2804,10 +2765,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         _context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
-        _client_x: f32,
-        _client_y: f32,
-        _client_width: f32,
-        _client_height: f32,
+        _args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -2835,8 +2793,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         _context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        _client_y: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -2844,7 +2801,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
 
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             self.adjust_drag_state
-                .set(Some((client_x, self.view.width.get())));
+                .set(Some((args.client_x, self.view.width.get())));
 
             return EventContinueControl::CAPTURE_ELEMENT | EventContinueControl::STOP_PROPAGATION;
         }
@@ -2863,10 +2820,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         _context: &mut AppState,
         ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -2874,7 +2828,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
 
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             if let Some((base_x, base_width)) = self.adjust_drag_state.get() {
-                let new_width = (base_width + (client_x - base_x)).max(10.0);
+                let new_width = (base_width + (args.client_x - base_x)).max(10.0);
                 self.view.set_width(ht, new_width);
             }
 
@@ -2884,10 +2838,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         if sender == self.view.ht_cell_area {
             let (_, local_y, _, _) = ht.translate_client_to_tree_local(
                 sender,
-                client_x,
-                client_y,
-                client_width,
-                client_height,
+                args.client_x,
+                args.client_y,
+                args.client_width,
+                args.client_height,
             );
 
             let new_index = (local_y / SpriteListCellView::CELL_HEIGHT).trunc();
@@ -2920,8 +2874,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         _context: &mut AppState,
         ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        _client_y: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -2929,7 +2882,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
 
         if sender == self.view.ht_adjust_area && !self.hidden.get() {
             if let Some((base_x, base_width)) = self.adjust_drag_state.replace(None) {
-                let new_width = (base_width + (client_x - base_x)).max(10.0);
+                let new_width = (base_width + (args.client_x - base_x)).max(10.0);
                 self.view.set_width(ht, new_width);
             }
 
@@ -2951,10 +2904,7 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         sender: HitTestTreeRef,
         context: &mut AppState,
         ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.view.ht_root {
             return EventContinueControl::STOP_PROPAGATION;
@@ -2979,10 +2929,10 @@ impl HitTestTreeActionHandler for SpriteListPaneHitActionHandler {
         if sender == self.view.ht_cell_area {
             let (_, local_y, _, _) = ht.translate_client_to_tree_local(
                 sender,
-                client_x,
-                client_y,
-                client_width,
-                client_height,
+                args.client_x,
+                args.client_y,
+                args.client_width,
+                args.client_height,
             );
 
             let click_index = (local_y / SpriteListCellView::CELL_HEIGHT).trunc();
@@ -3159,17 +3109,272 @@ impl SpriteListPanePresenter {
     }
 }
 
-struct AppMenuView {
+struct AppMenuEntryView {
+    root: ContainerVisual,
+    bg: SpriteVisual,
+    ht_root: HitTestTreeRef,
+    dpi: Cell<f32>,
+    hovering: Cell<bool>,
+    active: Cell<bool>,
+}
+impl AppMenuEntryView {
+    const HEIGHT: f32 = 24.0;
+    const ICON_SIZE: f32 = 20.0;
+    const ICON_LEFT_OFFSET: f32 = 8.0;
+    const ICON_LABEL_GAP: f32 = 4.0;
+
+    pub fn new(init: &mut ViewInitContext, icon_path: &str, label: &str) -> (Self, f32) {
+        let icon_path_w = icon_path
+            .encode_utf16()
+            .chain(core::iter::once(0))
+            .collect::<Vec<_>>();
+        let icon_svg_stream: IRandomAccessStream = unsafe {
+            CreateRandomAccessStreamOnFile(
+                PCWSTR::from_raw(icon_path_w.as_ptr()),
+                FileAccessMode::Read.0 as _,
+            )
+            .unwrap()
+        };
+        let icon_svg_stream: IStream =
+            unsafe { CreateStreamOverRandomAccessStream(&icon_svg_stream).unwrap() };
+        let icon_surface = init
+            .subsystem
+            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(Self::ICON_SIZE)))
+            .unwrap();
+        draw_2d(&icon_surface, |dc, offset| {
+            let dc5: ID2D1DeviceContext5 = dc.cast()?;
+
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    init.signed_pixels_to_dip(offset.x),
+                    init.signed_pixels_to_dip(offset.y),
+                ));
+            }
+
+            let svg = unsafe {
+                dc5.CreateSvgDocument(
+                    &icon_svg_stream,
+                    D2D_SIZE_F {
+                        width: pixels_to_dip(20, init.dpi),
+                        height: pixels_to_dip(20, init.dpi),
+                    },
+                )?
+            };
+
+            unsafe {
+                dc.Clear(None);
+                dc5.DrawSvgDocument(&svg);
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        let label_layout = init
+            .subsystem
+            .new_text_layout_unrestricted(label, &init.subsystem.default_ui_format)
+            .unwrap();
+        let mut label_metrics = MaybeUninit::uninit();
+        let label_metrics = unsafe {
+            label_layout.GetMetrics(label_metrics.as_mut_ptr()).unwrap();
+            label_metrics.assume_init()
+        };
+        let label_surface = init
+            .subsystem
+            .new_2d_drawing_surface(Size {
+                Width: init.dip_to_pixels(label_metrics.width),
+                Height: init.dip_to_pixels(label_metrics.height),
+            })
+            .unwrap();
+        draw_2d(&label_surface, |dc, offset| {
+            unsafe {
+                dc.SetDpi(init.dpi, init.dpi);
+
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: init.signed_pixels_to_dip(offset.x),
+                        y: init.signed_pixels_to_dip(offset.y),
+                    },
+                    &label_layout,
+                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        let root = ContainerVisualParams::new()
+            .expand_width()
+            .height(init.dip_to_pixels(Self::HEIGHT))
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let bg = SpriteVisualParams::new(
+            &init
+                .subsystem
+                .compositor
+                .CreateColorBrushWithColor(ui_color_from_websafe_hex_rgb(0xfff))
+                .unwrap(),
+        )
+        .expand()
+        .opacity(0.0)
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let icon = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&icon_surface)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .size_sq(init.dip_to_pixels(Self::ICON_SIZE))
+        .anchor_point(Vector2 { X: 0.0, Y: 0.5 })
+        .left(init.dip_to_pixels(Self::ICON_LEFT_OFFSET))
+        .relative_vertical_offset_adjustment(0.5)
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+        let label = SpriteVisualParams::new(
+            &CompositionSurfaceBrushParams::new(&label_surface)
+                .instantiate(&init.subsystem.compositor)
+                .unwrap(),
+        )
+        .size(Vector2 {
+            X: init.dip_to_pixels(label_metrics.width),
+            Y: init.dip_to_pixels(label_metrics.height),
+        })
+        .anchor_point(Vector2 { X: 0.0, Y: 0.5 })
+        .relative_vertical_offset_adjustment(0.5)
+        .left(init.dip_to_pixels(Self::ICON_LEFT_OFFSET + Self::ICON_SIZE + Self::ICON_LABEL_GAP))
+        .instantiate(&init.subsystem.compositor)
+        .unwrap();
+
+        let c = root.Children().unwrap();
+        c.InsertAtTop(&bg).unwrap();
+        c.InsertAtTop(&icon).unwrap();
+        c.InsertAtTop(&label).unwrap();
+
+        let bg_imp_animations = init
+            .subsystem
+            .compositor
+            .CreateImplicitAnimationCollection()
+            .unwrap();
+        bg_imp_animations
+            .Insert(
+                h!("Opacity"),
+                &SimpleImplicitAnimationParams::new(
+                    &init
+                        .subsystem
+                        .compositor
+                        .CreateLinearEasingFunction()
+                        .unwrap(),
+                    h!("Opacity"),
+                    timespan_ms(100),
+                )
+                .instantiate_scalar(&init.subsystem.compositor)
+                .unwrap(),
+            )
+            .unwrap();
+        bg.SetImplicitAnimations(&bg_imp_animations).unwrap();
+
+        let ht_root = init.ht.borrow_mut().alloc(HitTestTreeData {
+            left: 0.0,
+            top: 0.0,
+            left_adjustment_factor: 0.0,
+            top_adjustment_factor: 0.0,
+            width: 0.0,
+            height: Self::HEIGHT,
+            width_adjustment_factor: 1.0,
+            height_adjustment_factor: 0.0,
+            parent: None,
+            children: Vec::new(),
+            action_handler: None,
+        });
+
+        (
+            Self {
+                root,
+                bg,
+                ht_root,
+                dpi: Cell::new(init.dpi),
+                hovering: Cell::new(false),
+                active: Cell::new(false),
+            },
+            Self::ICON_LEFT_OFFSET
+                + Self::ICON_SIZE
+                + Self::ICON_LABEL_GAP
+                + label_metrics.width
+                + Self::ICON_LEFT_OFFSET,
+        )
+    }
+
+    pub fn mount(
+        &self,
+        children: &VisualCollection,
+        ht: &mut AppHitTestTreeManager,
+        ht_parent: HitTestTreeRef,
+    ) {
+        children.InsertAtTop(&self.root).unwrap();
+        ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn locate(&self, top: f32, ht: &mut AppHitTestTreeManager) {
+        let dpi = self.dpi.get();
+
+        self.root
+            .SetOffset(Vector3 {
+                X: 0.0,
+                Y: dip_to_pixels(top, dpi),
+                Z: 0.0,
+            })
+            .unwrap();
+        ht.get_mut(self.ht_root).top = top;
+    }
+
+    fn update_bg_opacity(&self) {
+        match (self.hovering.get(), self.active.get()) {
+            (false, _) => self.bg.SetOpacity(0.0).unwrap(),
+            (true, false) => self.bg.SetOpacity(0.125).unwrap(),
+            (true, true) => self.bg.SetOpacity(0.25).unwrap(),
+        }
+    }
+
+    pub fn on_hover(&self) {
+        self.hovering.set(true);
+        self.update_bg_opacity();
+    }
+
+    pub fn on_hover_leave(&self) {
+        self.hovering.set(false);
+        // 離れた際はactiveも一緒に落とす
+        self.active.set(false);
+        self.update_bg_opacity();
+    }
+
+    pub fn on_press(&self) {
+        self.active.set(true);
+        self.update_bg_opacity();
+    }
+
+    pub fn on_release(&self) {
+        self.active.set(false);
+        self.update_bg_opacity();
+    }
+}
+
+struct AppMenuBaseView {
     root: ContainerVisual,
     window_root: ContainerVisual,
     composition_params: CompositionPropertySet,
     show_animation: ScalarKeyFrameAnimation,
     hide_animation: ScalarKeyFrameAnimation,
     ht_root: HitTestTreeRef,
+    ht_window_root: HitTestTreeRef,
+    window_size: Cell<Size>,
     top_offset: Cell<f32>,
     dpi: Cell<f32>,
 }
-impl AppMenuView {
+impl AppMenuBaseView {
     const CORNER_RADIUS: f32 = 8.0;
     const BEAK_SIZE: f32 = 8.0;
     const BEAK_LEFT_OFFSET: f32 = 8.0;
@@ -3205,7 +3410,7 @@ impl AppMenuView {
 
         let beak_mask_surface = init
             .subsystem
-            .new_2d_drawing_surface(Size {
+            .new_2d_mask_surface(Size {
                 Width: init.dip_to_pixels(Self::BEAK_SIZE * 2.0),
                 Height: init.dip_to_pixels(Self::BEAK_SIZE),
             })
@@ -3225,38 +3430,6 @@ impl AppMenuView {
                     &beak_path,
                     &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
                     None,
-                );
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-
-        let frame_mask_surface = init
-            .subsystem
-            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(Self::CORNER_RADIUS * 2.0 + 1.0)))
-            .unwrap();
-        draw_2d(&frame_mask_surface, |dc, offset| {
-            unsafe {
-                dc.SetDpi(init.dpi, init.dpi);
-                dc.SetTransform(&Matrix3x2::translation(
-                    init.signed_pixels_to_dip(offset.x),
-                    init.signed_pixels_to_dip(offset.y),
-                ));
-
-                dc.Clear(None);
-                dc.FillRoundedRectangle(
-                    &D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: 0.0,
-                            top: 0.0,
-                            right: Self::CORNER_RADIUS * 2.0 + 1.0,
-                            bottom: Self::CORNER_RADIUS * 2.0 + 1.0,
-                        },
-                        radiusX: Self::CORNER_RADIUS,
-                        radiusY: Self::CORNER_RADIUS,
-                    },
-                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
                 );
             }
 
@@ -3341,10 +3514,15 @@ impl AppMenuView {
             &CompositionMaskBrushParams {
                 source: &window_base_brush,
                 mask: &CompositionNineGridBrushParams::new(
-                    &CompositionSurfaceBrushParams::new(&frame_mask_surface)
-                        .stretch(CompositionStretch::Fill)
-                        .instantiate(&init.subsystem.compositor)
-                        .unwrap(),
+                    &CompositionSurfaceBrushParams::new(
+                        &init
+                            .subsystem
+                            .rounded_rect_mask_surface(init.dpi, Self::CORNER_RADIUS)
+                            .unwrap(),
+                    )
+                    .stretch(CompositionStretch::Fill)
+                    .instantiate(&init.subsystem.compositor)
+                    .unwrap(),
                 )
                 .insets(init.dip_to_pixels(Self::CORNER_RADIUS))
                 .instantiate(&init.subsystem.compositor)
@@ -3440,265 +3618,20 @@ impl AppMenuView {
             children: Vec::new(),
             action_handler: None,
         });
-
-        let icon_svg_stream: IRandomAccessStream = unsafe {
-            CreateRandomAccessStreamOnFile(
-                w!("./resources/file_open.svg"),
-                FileAccessMode::Read.0 as _,
-            )
-            .unwrap()
-        };
-        let icon_svg_stream: IStream =
-            unsafe { CreateStreamOverRandomAccessStream(&icon_svg_stream).unwrap() };
-        let icon_surface = init
-            .subsystem
-            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(20.0)))
-            .unwrap();
-        draw_2d(&icon_surface, |dc, offset| {
-            let dc5: ID2D1DeviceContext5 = dc.cast()?;
-
-            unsafe {
-                dc.SetDpi(init.dpi, init.dpi);
-                dc.SetTransform(&Matrix3x2::translation(
-                    init.signed_pixels_to_dip(offset.x),
-                    init.signed_pixels_to_dip(offset.y),
-                ));
-            }
-
-            let svg = unsafe {
-                dc5.CreateSvgDocument(
-                    &icon_svg_stream,
-                    D2D_SIZE_F {
-                        width: pixels_to_dip(20, init.dpi),
-                        height: pixels_to_dip(20, init.dpi),
-                    },
-                )?
-            };
-
-            unsafe {
-                dc.Clear(None);
-                dc5.DrawSvgDocument(&svg);
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-
-        let open_cell = ContainerVisualParams::new()
-            .expand_width()
-            .height(init.dip_to_pixels(20.0))
-            .offset_xy(Vector2 {
-                X: init.dip_to_pixels(0.0),
-                Y: init.dip_to_pixels(Self::CORNER_RADIUS),
-            })
-            .instantiate(&init.subsystem.compositor)
-            .unwrap();
-        let icon = SpriteVisualParams::new(
-            &CompositionSurfaceBrushParams::new(&icon_surface)
-                .instantiate(&init.subsystem.compositor)
-                .unwrap(),
-        )
-        .size_sq(init.dip_to_pixels(20.0))
-        .left(init.dip_to_pixels(Self::CORNER_RADIUS))
-        .instantiate(&init.subsystem.compositor)
-        .unwrap();
-
-        let cell_label_layout = init
-            .subsystem
-            .new_text_layout_unrestricted("開く", &init.subsystem.default_ui_format)
-            .unwrap();
-        let mut cell_label_metrics = MaybeUninit::uninit();
-        unsafe {
-            cell_label_layout
-                .GetMetrics(cell_label_metrics.as_mut_ptr())
-                .unwrap();
-        }
-        let cell_label_metrics = unsafe { cell_label_metrics.assume_init() };
-        let cell_label = init
-            .subsystem
-            .new_2d_drawing_surface(Size {
-                Width: init.dip_to_pixels(cell_label_metrics.width),
-                Height: init.dip_to_pixels(cell_label_metrics.height),
-            })
-            .unwrap();
-        draw_2d(&cell_label, |dc, offset| {
-            unsafe {
-                dc.SetDpi(init.dpi, init.dpi);
-
-                dc.Clear(None);
-                dc.DrawTextLayout(
-                    D2D_POINT_2F {
-                        x: init.signed_pixels_to_dip(offset.x),
-                        y: init.signed_pixels_to_dip(offset.y),
-                    },
-                    &cell_label_layout,
-                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-        let cell_label = SpriteVisualParams::new(
-            &CompositionSurfaceBrushParams::new(&cell_label)
-                .instantiate(&init.subsystem.compositor)
-                .unwrap(),
-        )
-        .anchor_point(Vector2 { X: 0.0, Y: 0.5 })
-        .relative_offset_adjustment_xy(Vector2 { X: 0.0, Y: 0.5 })
-        .offset_xy(Vector2 {
-            X: init.dip_to_pixels(Self::CORNER_RADIUS + 20.0 + 4.0),
-            Y: 0.0,
-        })
-        .size(Vector2 {
-            X: init.dip_to_pixels(cell_label_metrics.width),
-            Y: init.dip_to_pixels(cell_label_metrics.height),
-        })
-        .instantiate(&init.subsystem.compositor)
-        .unwrap();
-
-        let icon_svg_stream: IRandomAccessStream = unsafe {
-            CreateRandomAccessStreamOnFile(
-                w!("./resources/file_save.svg"),
-                FileAccessMode::Read.0 as _,
-            )
-            .unwrap()
-        };
-        let icon_svg_stream: IStream =
-            unsafe { CreateStreamOverRandomAccessStream(&icon_svg_stream).unwrap() };
-        let icon_surface = init
-            .subsystem
-            .new_2d_drawing_surface(size_sq(init.dip_to_pixels(20.0)))
-            .unwrap();
-        draw_2d(&icon_surface, |dc, offset| {
-            let dc5: ID2D1DeviceContext5 = dc.cast()?;
-
-            unsafe {
-                dc.SetDpi(init.dpi, init.dpi);
-                dc.SetTransform(&Matrix3x2::translation(
-                    init.signed_pixels_to_dip(offset.x),
-                    init.signed_pixels_to_dip(offset.y),
-                ));
-            }
-
-            let svg = unsafe {
-                dc5.CreateSvgDocument(
-                    &icon_svg_stream,
-                    D2D_SIZE_F {
-                        width: pixels_to_dip(20, init.dpi),
-                        height: pixels_to_dip(20, init.dpi),
-                    },
-                )?
-            };
-
-            unsafe {
-                dc.Clear(None);
-                dc5.DrawSvgDocument(&svg);
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-
-        open_cell.Children().unwrap().InsertAtTop(&icon).unwrap();
-        open_cell
-            .Children()
-            .unwrap()
-            .InsertAtTop(&cell_label)
-            .unwrap();
-
-        let save_cell = ContainerVisualParams::new()
-            .expand_width()
-            .height(init.dip_to_pixels(20.0))
-            .offset_xy(Vector2 {
-                X: init.dip_to_pixels(0.0),
-                Y: init.dip_to_pixels(Self::CORNER_RADIUS + 24.0),
-            })
-            .instantiate(&init.subsystem.compositor)
-            .unwrap();
-        let icon = SpriteVisualParams::new(
-            &CompositionSurfaceBrushParams::new(&icon_surface)
-                .instantiate(&init.subsystem.compositor)
-                .unwrap(),
-        )
-        .size_sq(init.dip_to_pixels(20.0))
-        .left(init.dip_to_pixels(Self::CORNER_RADIUS))
-        .instantiate(&init.subsystem.compositor)
-        .unwrap();
-
-        let cell_label_layout = init
-            .subsystem
-            .new_text_layout_unrestricted("保存", &init.subsystem.default_ui_format)
-            .unwrap();
-        let mut cell_label_metrics = MaybeUninit::uninit();
-        unsafe {
-            cell_label_layout
-                .GetMetrics(cell_label_metrics.as_mut_ptr())
-                .unwrap();
-        }
-        let cell_label_metrics = unsafe { cell_label_metrics.assume_init() };
-        let cell_label = init
-            .subsystem
-            .new_2d_drawing_surface(Size {
-                Width: init.dip_to_pixels(cell_label_metrics.width),
-                Height: init.dip_to_pixels(cell_label_metrics.height),
-            })
-            .unwrap();
-        draw_2d(&cell_label, |dc, offset| {
-            unsafe {
-                dc.SetDpi(init.dpi, init.dpi);
-
-                dc.Clear(None);
-                dc.DrawTextLayout(
-                    D2D_POINT_2F {
-                        x: init.signed_pixels_to_dip(offset.x),
-                        y: init.signed_pixels_to_dip(offset.y),
-                    },
-                    &cell_label_layout,
-                    &dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)?,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                );
-            }
-
-            Ok::<_, windows_core::Error>(())
-        })
-        .unwrap();
-        let cell_label = SpriteVisualParams::new(
-            &CompositionSurfaceBrushParams::new(&cell_label)
-                .instantiate(&init.subsystem.compositor)
-                .unwrap(),
-        )
-        .anchor_point(Vector2 { X: 0.0, Y: 0.5 })
-        .relative_offset_adjustment_xy(Vector2 { X: 0.0, Y: 0.5 })
-        .offset_xy(Vector2 {
-            X: init.dip_to_pixels(Self::CORNER_RADIUS + 20.0 + 4.0),
-            Y: 0.0,
-        })
-        .size(Vector2 {
-            X: init.dip_to_pixels(cell_label_metrics.width),
-            Y: init.dip_to_pixels(cell_label_metrics.height),
-        })
-        .instantiate(&init.subsystem.compositor)
-        .unwrap();
-
-        save_cell.Children().unwrap().InsertAtTop(&icon).unwrap();
-        save_cell
-            .Children()
-            .unwrap()
-            .InsertAtTop(&cell_label)
-            .unwrap();
-
-        window_root
-            .Children()
-            .unwrap()
-            .InsertAtTop(&open_cell)
-            .unwrap();
-        window_root
-            .Children()
-            .unwrap()
-            .InsertAtTop(&save_cell)
-            .unwrap();
+        let ht_window_root = init.ht.borrow_mut().alloc(HitTestTreeData {
+            left: 0.0,
+            top: 0.0,
+            left_adjustment_factor: 0.0,
+            top_adjustment_factor: 0.0,
+            width: 128.0,
+            height: 128.0,
+            width_adjustment_factor: 0.0,
+            height_adjustment_factor: 0.0,
+            parent: None,
+            children: Vec::new(),
+            action_handler: None,
+        });
+        init.ht.borrow_mut().add_child(ht_root, ht_window_root);
 
         Self {
             root,
@@ -3707,6 +3640,11 @@ impl AppMenuView {
             show_animation,
             hide_animation,
             ht_root,
+            ht_window_root,
+            window_size: Cell::new(Size {
+                Width: 128.0,
+                Height: 128.0,
+            }),
             top_offset: Cell::new(top_offset),
             dpi: Cell::new(init.dpi),
         }
@@ -3722,7 +3660,12 @@ impl AppMenuView {
         ht.add_child(ht_parent, self.ht_root);
     }
 
-    pub fn set_window_offset_by_beak_peak(&self, peak_x: f32, peak_y: f32) {
+    pub fn set_window_offset_by_beak_peak(
+        &self,
+        peak_x: f32,
+        peak_y: f32,
+        ht: &mut AppHitTestTreeManager,
+    ) {
         let dpi = self.dpi.get();
         let top_offset = self.top_offset.get();
 
@@ -3735,6 +3678,27 @@ impl AppMenuView {
                 },
             )
             .unwrap();
+        ht.get_mut(self.ht_window_root).left = peak_x - Self::BEAK_LEFT_OFFSET - Self::BEAK_SIZE;
+        ht.get_mut(self.ht_window_root).top = peak_y + Self::BEAK_SIZE - top_offset;
+    }
+
+    pub fn resize_window(&self, w: f32, h: f32, ht: &mut AppHitTestTreeManager) {
+        let dpi = self.dpi.get();
+
+        let mut window_size = self.window_size.get();
+        window_size.Width = w;
+        window_size.Height = h;
+
+        self.window_root
+            .SetSize(Vector2 {
+                X: dip_to_pixels(window_size.Width, dpi),
+                Y: dip_to_pixels(window_size.Height, dpi),
+            })
+            .unwrap();
+        ht.get_mut(self.ht_window_root).width = w;
+        ht.get_mut(self.ht_window_root).height = h;
+
+        self.window_size.set(window_size);
     }
 
     pub fn show(&self, immediate: bool) {
@@ -3759,6 +3723,246 @@ impl AppMenuView {
                 .StartAnimation(h!("VisibleRate"), &self.hide_animation)
                 .unwrap();
         }
+    }
+}
+
+struct AppMenuHitTestActionHandler {
+    base: Rc<AppMenuBaseView>,
+    entries: Rc<Vec<AppMenuEntryView>>,
+}
+impl HitTestTreeActionHandler for AppMenuHitTestActionHandler {
+    type Context = AppState;
+
+    fn hit_active(&self, sender: HitTestTreeRef, context: &Self::Context) -> bool {
+        if sender == self.base.ht_root && !context.is_visible_menu() {
+            // AppMenuが表示されていないときはAppMenuのヒットテストを無効化する
+            return false;
+        }
+
+        true
+    }
+
+    fn on_pointer_enter(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: PointerActionArgs,
+    ) -> EventContinueControl {
+        for x in self.entries.iter() {
+            if sender == x.ht_root {
+                x.on_hover();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_leave(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: PointerActionArgs,
+    ) -> EventContinueControl {
+        for x in self.entries.iter() {
+            if sender == x.ht_root {
+                x.on_hover_leave();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_down(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
+        _args: PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        for x in self.entries.iter() {
+            if sender == x.ht_root {
+                x.on_press();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_move(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
+        _args: PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_pointer_up(
+        &self,
+        sender: HitTestTreeRef,
+        _context: &mut AppState,
+        _ht: &mut AppHitTestTreeManager,
+        _args: PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base.ht_root {
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        for x in self.entries.iter() {
+            if sender == x.ht_root {
+                x.on_release();
+                return EventContinueControl::STOP_PROPAGATION;
+            }
+        }
+
+        EventContinueControl::empty()
+    }
+
+    fn on_click(
+        &self,
+        sender: HitTestTreeRef,
+        context: &mut Self::Context,
+        _ht: &mut HitTestTreeManager<Self::Context>,
+        _args: PointerActionArgs,
+    ) -> EventContinueControl {
+        if sender == self.base.ht_window_root {
+            // 実ウィンドウの上だったらなにもしない
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.base.ht_root {
+            context.toggle_menu();
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        EventContinueControl::empty()
+    }
+}
+
+pub struct AppMenuPresenter {
+    base: Rc<AppMenuBaseView>,
+    entries: Rc<Vec<AppMenuEntryView>>,
+    _ht_action_handler: Rc<AppMenuHitTestActionHandler>,
+}
+impl AppMenuPresenter {
+    pub fn new(init: &mut PresenterInitContext, top_offset: f32) -> Self {
+        let base = Rc::new(AppMenuBaseView::new(&mut init.for_view, top_offset));
+        let mut entries = Vec::new();
+        let mut max_width = 128.0f32;
+        let (e, w) = AppMenuEntryView::new(&mut init.for_view, "./resources/file_open.svg", "開く");
+        entries.push(e);
+        max_width = max_width.max(w);
+        let (e, w) = AppMenuEntryView::new(&mut init.for_view, "./resources/save.svg", "保存");
+        entries.push(e);
+        max_width = max_width.max(w);
+        let (e, w) =
+            AppMenuEntryView::new(&mut init.for_view, "./resources/save_as.svg", "別名で保存");
+        entries.push(e);
+        max_width = max_width.max(w);
+        let (e, w) = AppMenuEntryView::new(
+            &mut init.for_view,
+            "./resources/category.svg",
+            "自動パッキング",
+        );
+        entries.push(e);
+        max_width = max_width.max(w);
+        let (e, w) = AppMenuEntryView::new(
+            &mut init.for_view,
+            "./resources/resize.svg",
+            "アトラスのサイズを調整",
+        );
+        entries.push(e);
+        max_width = max_width.max(w);
+
+        for (n, x) in entries.iter().enumerate() {
+            x.mount(
+                &base.window_root.Children().unwrap(),
+                &mut init.for_view.ht.borrow_mut(),
+                base.ht_window_root,
+            );
+            x.locate(
+                AppMenuBaseView::CORNER_RADIUS + n as f32 * AppMenuEntryView::HEIGHT,
+                &mut init.for_view.ht.borrow_mut(),
+            );
+        }
+
+        base.resize_window(
+            max_width,
+            AppMenuBaseView::CORNER_RADIUS * 2.0 + entries.len() as f32 * AppMenuEntryView::HEIGHT,
+            &mut init.for_view.ht.borrow_mut(),
+        );
+
+        let entries = Rc::new(entries);
+        let ht_action_handler = Rc::new(AppMenuHitTestActionHandler {
+            base: base.clone(),
+            entries: entries.clone(),
+        });
+        init.for_view
+            .ht
+            .borrow_mut()
+            .get_mut(base.ht_root)
+            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+        for x in entries.iter() {
+            init.for_view
+                .ht
+                .borrow_mut()
+                .get_mut(x.ht_root)
+                .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
+        }
+
+        init.app_state
+            .borrow_mut()
+            .register_visible_menu_view_feedback({
+                let base_view = Rc::downgrade(&base);
+
+                move |visible, initial_fire| {
+                    let Some(base_view) = base_view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+
+                    if visible {
+                        base_view.show(initial_fire);
+                    } else {
+                        base_view.hide(initial_fire);
+                    }
+                }
+            });
+
+        Self {
+            base,
+            entries,
+            _ht_action_handler: ht_action_handler,
+        }
+    }
+
+    #[inline]
+    pub fn mount(
+        &self,
+        children: &VisualCollection,
+        ht: &mut AppHitTestTreeManager,
+        ht_parent: HitTestTreeRef,
+    ) {
+        self.base.mount(children, ht, ht_parent);
+    }
+
+    #[inline]
+    pub fn set_window_offset_by_beak_peak(&self, x: f32, y: f32, ht: &mut AppHitTestTreeManager) {
+        self.base.set_window_offset_by_beak_peak(x, y, ht);
     }
 }
 
@@ -3918,7 +4122,6 @@ struct AppWindowHitTestTreeActionHandler {
     grid_view: Arc<AtlasBaseGridView>,
     sprite_atlas_border_view: Rc<SpriteAtlasBorderView>,
     selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
-    menu_view: Rc<AppMenuView>,
     qt: RefCell<QuadTree>,
     sprite_rect_cached: RefCell<Vec<(u32, u32, u32, u32)>>,
     drag_data: RefCell<DragState>,
@@ -3928,34 +4131,20 @@ struct AppWindowHitTestTreeActionHandler {
 impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
     type Context = AppState;
 
-    fn hit_active(&self, sender: HitTestTreeRef, context: &Self::Context) -> bool {
-        if sender == self.menu_view.ht_root && !context.is_visible_menu() {
-            // AppMenuが表示されていないときはAppMenuのヒットテストを無効化する
-            return false;
-        }
-
-        true
-    }
-
     fn on_pointer_down(
         &self,
         sender: HitTestTreeRef,
         context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        client_y: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.menu_view.ht_root {
-            return EventContinueControl::STOP_PROPAGATION;
-        }
-
         if sender == self.ht_root {
             let dpi = self.dpi.get();
             let (current_offset_x, current_offset_y) = *self.grid_view.offset_pixels.read();
 
             let (pointing_x, pointing_y) = (
-                dip_to_pixels(client_x, dpi) + current_offset_x,
-                dip_to_pixels(client_y, dpi) + current_offset_y,
+                dip_to_pixels(args.client_x, dpi) + current_offset_x,
+                dip_to_pixels(args.client_y, dpi) + current_offset_y,
             );
             let sprite_drag_target_index =
                 context.selected_sprites_with_index().rev().find(|(_, x)| {
@@ -3973,15 +4162,15 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                     base_y_pixels: target_sprite_ref.top as f32,
                     base_width_pixels: target_sprite_ref.width as f32,
                     base_height_pixels: target_sprite_ref.height as f32,
-                    drag_start_client_x_pixels: dip_to_pixels(client_x, dpi),
-                    drag_start_client_y_pixels: dip_to_pixels(client_y, dpi),
+                    drag_start_client_x_pixels: dip_to_pixels(args.client_x, dpi),
+                    drag_start_client_y_pixels: dip_to_pixels(args.client_y, dpi),
                 };
             } else {
                 *self.drag_data.borrow_mut() = DragState::Grid {
                     base_x_pixels: current_offset_x,
                     base_y_pixels: current_offset_y,
-                    drag_start_client_x_pixels: dip_to_pixels(client_x, dpi),
-                    drag_start_client_y_pixels: dip_to_pixels(client_y, dpi),
+                    drag_start_client_x_pixels: dip_to_pixels(args.client_x, dpi),
+                    drag_start_client_y_pixels: dip_to_pixels(args.client_y, dpi),
                 };
             }
 
@@ -3996,15 +4185,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         sender: HitTestTreeRef,
         _context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        client_y: f32,
-        _client_width: f32,
-        _client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.menu_view.ht_root {
-            return EventContinueControl::STOP_PROPAGATION;
-        }
-
         if sender == self.ht_root {
             match &*self.drag_data.borrow() {
                 DragState::None => {}
@@ -4016,8 +4198,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                 } => {
                     let dpi = self.dpi.get();
                     let (dx, dy) = (
-                        drag_start_client_x_pixels - dip_to_pixels(client_x, dpi),
-                        drag_start_client_y_pixels - dip_to_pixels(client_y, dpi),
+                        drag_start_client_x_pixels - dip_to_pixels(args.client_x, dpi),
+                        drag_start_client_y_pixels - dip_to_pixels(args.client_y, dpi),
                     );
                     self.grid_view
                         .set_offset(base_x_pixels + dx, base_y_pixels + dy);
@@ -4038,8 +4220,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                 } => {
                     let dpi = self.dpi.get();
                     let (dx, dy) = (
-                        dip_to_pixels(client_x, dpi) - drag_start_client_x_pixels,
-                        dip_to_pixels(client_y, dpi) - drag_start_client_y_pixels,
+                        dip_to_pixels(args.client_x, dpi) - drag_start_client_x_pixels,
+                        dip_to_pixels(args.client_y, dpi) - drag_start_client_y_pixels,
                     );
                     let (sx, sy) = (
                         (base_x_pixels + dx).max(0.0) as u32,
@@ -4060,13 +4242,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut AppState,
         _ht: &mut AppHitTestTreeManager,
-        client_x: f32,
-        client_y: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.menu_view.ht_root {
-            return EventContinueControl::STOP_PROPAGATION;
-        }
-
         if sender == self.ht_root {
             match core::mem::replace(&mut *self.drag_data.borrow_mut(), DragState::None) {
                 DragState::None => {}
@@ -4078,8 +4255,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                 } => {
                     let dpi = self.dpi.get();
                     let (dx, dy) = (
-                        drag_start_client_x_pixels - dip_to_pixels(client_x, dpi),
-                        drag_start_client_y_pixels - dip_to_pixels(client_y, dpi),
+                        drag_start_client_x_pixels - dip_to_pixels(args.client_x, dpi),
+                        drag_start_client_y_pixels - dip_to_pixels(args.client_y, dpi),
                     );
                     self.grid_view
                         .set_offset(base_x_pixels + dx, base_y_pixels + dy);
@@ -4099,8 +4276,8 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
                 } => {
                     let dpi = self.dpi.get();
                     let (dx, dy) = (
-                        dip_to_pixels(client_x, dpi) - drag_start_client_x_pixels,
-                        dip_to_pixels(client_y, dpi) - drag_start_client_y_pixels,
+                        dip_to_pixels(args.client_x, dpi) - drag_start_client_x_pixels,
+                        dip_to_pixels(args.client_y, dpi) - drag_start_client_y_pixels,
                     );
                     let (sx, sy) = (
                         (base_x_pixels + dx).max(0.0) as u32,
@@ -4130,20 +4307,12 @@ impl HitTestTreeActionHandler for AppWindowHitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        _client_width: f32,
-        _client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
-        if sender == self.menu_view.ht_root {
-            context.toggle_menu();
-            return EventContinueControl::STOP_PROPAGATION;
-        }
-
         if sender == self.ht_root {
             let dpi = self.dpi.get();
-            let x = dip_to_pixels(client_x, dpi) + self.grid_view.offset_pixels.read().0;
-            let y = dip_to_pixels(client_y, dpi) + self.grid_view.offset_pixels.read().1;
+            let x = dip_to_pixels(args.client_x, dpi) + self.grid_view.offset_pixels.read().0;
+            let y = dip_to_pixels(args.client_y, dpi) + self.grid_view.offset_pixels.read().1;
 
             let mut max_index = None;
             for n in self
@@ -4188,7 +4357,7 @@ struct AppWindowPresenter {
     _selected_sprite_marker_view: Rc<CurrentSelectedSpriteMarkerView>,
     sprite_list_pane: SpriteListPanePresenter,
     header: AppHeaderPresenter,
-    _menu_view: Rc<AppMenuView>,
+    _menu: AppMenuPresenter,
     file_dnd_overlay: Rc<FileDragAndDropOverlayView>,
     _ht_action_handler: Rc<AppWindowHitTestTreeActionHandler>,
     _dpi_handler: Rc<AppWindowDpiHandler>,
@@ -4241,10 +4410,11 @@ impl AppWindowPresenter {
 
         let header = AppHeaderPresenter::new(init, "Peridot SpriteAtlas Visualizer/Editor");
 
-        let menu_view = Rc::new(AppMenuView::new(&mut init.for_view, header.height()));
-        menu_view.set_window_offset_by_beak_peak(
+        let menu = AppMenuPresenter::new(init, header.height());
+        menu.set_window_offset_by_beak_peak(
             header.height() * 0.5,
             header.height() * 0.5 + 6.0 + 2.0,
+            &mut init.for_view.ht.borrow_mut(),
         );
 
         let file_dnd_overlay = Rc::new(FileDragAndDropOverlayView::new(&mut init.for_view));
@@ -4266,7 +4436,7 @@ impl AppWindowPresenter {
             &mut init.for_view.ht.borrow_mut(),
             ht_root,
         );
-        menu_view.mount(
+        menu.mount(
             &root.Children().unwrap(),
             &mut init.for_view.ht.borrow_mut(),
             ht_root,
@@ -4277,7 +4447,6 @@ impl AppWindowPresenter {
             grid_view: grid_view.clone(),
             sprite_atlas_border_view: sprite_atlas_border_view.clone(),
             selected_sprite_marker_view: selected_sprite_marker_view.clone(),
-            menu_view: menu_view.clone(),
             qt: RefCell::new(QuadTree::new()),
             sprite_rect_cached: RefCell::new(Vec::new()),
             drag_data: RefCell::new(DragState::None),
@@ -4288,11 +4457,6 @@ impl AppWindowPresenter {
             .ht
             .borrow_mut()
             .get_mut(ht_root)
-            .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
-        init.for_view
-            .ht
-            .borrow_mut()
-            .get_mut(menu_view.ht_root)
             .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
 
         let dpi_handler = Rc::new(AppWindowDpiHandler {
@@ -4432,24 +4596,6 @@ impl AppWindowPresenter {
                     grid_view.set_atlas_size(size.width, size.height);
                 }
             });
-        init.app_state
-            .borrow_mut()
-            .register_visible_menu_view_feedback({
-                let menu_view = Rc::downgrade(&menu_view);
-
-                move |visible, initial_fire| {
-                    let Some(menu_view) = menu_view.upgrade() else {
-                        // parent teardown-ed
-                        return;
-                    };
-
-                    if visible {
-                        menu_view.show(initial_fire);
-                    } else {
-                        menu_view.hide(initial_fire);
-                    }
-                }
-            });
 
         Self {
             root,
@@ -4459,7 +4605,7 @@ impl AppWindowPresenter {
             _selected_sprite_marker_view: selected_sprite_marker_view,
             sprite_list_pane,
             header,
-            _menu_view: menu_view,
+            _menu: menu,
             file_dnd_overlay,
             _ht_action_handler: ht_action_handler,
             _dpi_handler: dpi_handler,

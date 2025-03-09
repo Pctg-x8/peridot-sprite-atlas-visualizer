@@ -36,7 +36,10 @@ use crate::{
     create_instant_effect_brush,
     effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams},
     extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite,
-    hittest::{HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef},
+    hittest::{
+        HitTestTreeActionHandler, HitTestTreeData, HitTestTreeManager, HitTestTreeRef,
+        PointerActionArgs,
+    },
     input::EventContinueControl,
     surface_helper::draw_2d,
 };
@@ -789,18 +792,15 @@ impl HitTestTreeActionHandler for AppHeaderHitTestActionHandler {
         sender: HitTestTreeRef,
         _context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
             let (rel_x_dip, rel_y_dip, _, _) = ht.translate_client_to_tree_local(
                 sender,
-                client_x,
-                client_y,
-                client_width,
-                client_height,
+                args.client_x,
+                args.client_y,
+                args.client_width,
+                args.client_height,
             );
             self.menu_button_view
                 .set_opacity_by_local_pos(rel_x_dip, rel_y_dip);
@@ -816,10 +816,7 @@ impl HitTestTreeActionHandler for AppHeaderHitTestActionHandler {
         sender: HitTestTreeRef,
         _context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
-        _client_x: f32,
-        _client_y: f32,
-        _client_width: f32,
-        _client_height: f32,
+        _args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
             self.menu_button_view.bg.SetOpacity(0.0).unwrap();
@@ -835,18 +832,15 @@ impl HitTestTreeActionHandler for AppHeaderHitTestActionHandler {
         sender: HitTestTreeRef,
         _context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
             let (rel_x_dip, rel_y_dip, _, _) = ht.translate_client_to_tree_local(
                 sender,
-                client_x,
-                client_y,
-                client_width,
-                client_height,
+                args.client_x,
+                args.client_y,
+                args.client_width,
+                args.client_height,
             );
             self.menu_button_view
                 .set_opacity_by_local_pos(rel_x_dip, rel_y_dip);
@@ -862,10 +856,7 @@ impl HitTestTreeActionHandler for AppHeaderHitTestActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
-        _client_x: f32,
-        _client_y: f32,
-        _client_width: f32,
-        _client_height: f32,
+        _args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.menu_button_view.ht_root {
             context.toggle_menu();

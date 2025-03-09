@@ -11,7 +11,7 @@ use windows::{
 };
 use windows_numerics::Vector2;
 
-use crate::hittest::{HitTestTreeManager, HitTestTreeRef};
+use crate::hittest::{HitTestTreeManager, HitTestTreeRef, PointerActionArgs};
 
 const CLICK_DETECTION_MAX_DISTNACE: f32 = 4.0;
 
@@ -77,10 +77,12 @@ impl PointerInputManager {
                         tr,
                         action_context,
                         ht,
-                        client_x,
-                        client_y,
-                        client_size.Width,
-                        client_size.Height,
+                        PointerActionArgs {
+                            client_x,
+                            client_y,
+                            client_width: client_size.Width,
+                            client_height: client_size.Height,
+                        },
                     )
                 });
 
@@ -110,10 +112,12 @@ impl PointerInputManager {
                             tr,
                             action_context,
                             ht,
-                            client_x,
-                            client_y,
-                            client_size.Width,
-                            client_size.Height,
+                            PointerActionArgs {
+                                client_x,
+                                client_y,
+                                client_width: client_size.Width,
+                                client_height: client_size.Height,
+                            },
                         )
                     });
                     if cont.contains(EventContinueControl::STOP_PROPAGATION) {
@@ -134,10 +138,12 @@ impl PointerInputManager {
                                 tr,
                                 action_context,
                                 ht,
-                                client_x,
-                                client_y,
-                                client_size.Width,
-                                client_size.Height,
+                                PointerActionArgs {
+                                    client_x,
+                                    client_y,
+                                    client_width: client_size.Width,
+                                    client_height: client_size.Height,
+                                },
                             )
                         });
                         if cont.contains(EventContinueControl::STOP_PROPAGATION) {
@@ -165,10 +171,12 @@ impl PointerInputManager {
                     tr,
                     action_context,
                     ht,
-                    client_x,
-                    client_y,
-                    client_size.Width,
-                    client_size.Height,
+                    PointerActionArgs {
+                        client_x,
+                        client_y,
+                        client_width: client_size.Width,
+                        client_height: client_size.Height,
+                    },
                 )
             });
             if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
@@ -199,12 +207,22 @@ impl PointerInputManager {
 
         match self.pointer_focus {
             PointerFocusState::Capturing(tr) => {
-                let flags = ht
-                    .get(tr)
-                    .action_handler()
-                    .map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_down(tr, action_context, ht, client_x, client_y)
-                    });
+                let flags =
+                    ht.get(tr)
+                        .action_handler()
+                        .map_or(EventContinueControl::empty(), |a| {
+                            a.on_pointer_down(
+                                tr,
+                                action_context,
+                                ht,
+                                PointerActionArgs {
+                                    client_x,
+                                    client_y,
+                                    client_width: client_size.Width,
+                                    client_height: client_size.Height,
+                                },
+                            )
+                        });
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                     self.on_mouse_move(
                         ht,
@@ -238,7 +256,17 @@ impl PointerInputManager {
                     let next = t.parent;
                     let action_handler = t.action_handler();
                     let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_down(tr, action_context, ht, client_x, client_y)
+                        a.on_pointer_down(
+                            tr,
+                            action_context,
+                            ht,
+                            PointerActionArgs {
+                                client_x,
+                                client_y,
+                                client_width: client_size.Width,
+                                client_height: client_size.Height,
+                            },
+                        )
                     });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                         self.on_mouse_move(
@@ -281,12 +309,22 @@ impl PointerInputManager {
 
         match self.pointer_focus {
             PointerFocusState::Capturing(tr) => {
-                let flags = ht
-                    .get(tr)
-                    .action_handler()
-                    .map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_up(tr, action_context, ht, client_x, client_y)
-                    });
+                let flags =
+                    ht.get(tr)
+                        .action_handler()
+                        .map_or(EventContinueControl::empty(), |a| {
+                            a.on_pointer_up(
+                                tr,
+                                action_context,
+                                ht,
+                                PointerActionArgs {
+                                    client_x,
+                                    client_y,
+                                    client_width: client_size.Width,
+                                    client_height: client_size.Height,
+                                },
+                            )
+                        });
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                     self.on_mouse_move(
                         ht,
@@ -320,7 +358,17 @@ impl PointerInputManager {
                     let next = t.parent;
                     let action_handler = t.action_handler();
                     let flags = action_handler.map_or(EventContinueControl::empty(), |a| {
-                        a.on_pointer_up(tr, action_context, ht, client_x, client_y)
+                        a.on_pointer_up(
+                            tr,
+                            action_context,
+                            ht,
+                            PointerActionArgs {
+                                client_x,
+                                client_y,
+                                client_width: client_size.Width,
+                                client_height: client_size.Height,
+                            },
+                        )
                     });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                         self.on_mouse_move(
@@ -359,10 +407,12 @@ impl PointerInputManager {
                                     tr,
                                     action_context,
                                     ht,
-                                    client_x,
-                                    client_y,
-                                    client_size.Width,
-                                    client_size.Height,
+                                    PointerActionArgs {
+                                        client_x,
+                                        client_y,
+                                        client_width: client_size.Width,
+                                        client_height: client_size.Height,
+                                    },
                                 )
                             });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
@@ -402,10 +452,12 @@ impl PointerInputManager {
                                 tr,
                                 action_context,
                                 ht,
-                                client_x,
-                                client_y,
-                                client_size.Width,
-                                client_size.Height,
+                                PointerActionArgs {
+                                    client_x,
+                                    client_y,
+                                    client_width: client_size.Width,
+                                    client_height: client_size.Height,
+                                },
                             )
                         });
                         if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {

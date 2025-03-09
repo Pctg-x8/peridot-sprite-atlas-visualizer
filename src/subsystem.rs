@@ -14,8 +14,10 @@ use windows::{
                 CreatePresentationFactory, IPresentationFactory, IPresentationManager,
             },
             Direct2D::{
-                D2D1_DEBUG_LEVEL_WARNING, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_MULTI_THREADED,
-                D2D1CreateFactory, ID2D1Device, ID2D1Factory1,
+                Common::{D2D_POINT_2F, D2D_RECT_F, D2D1_COLOR_F},
+                D2D1_DEBUG_LEVEL_WARNING, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS,
+                D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_ROUNDED_RECT, D2D1CreateFactory,
+                ID2D1Device, ID2D1Factory1,
             },
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::{
@@ -36,6 +38,12 @@ use windows::{
     core::{Interface, h, implement, w},
 };
 use windows_core::{BOOL, HSTRING};
+use windows_numerics::Matrix3x2;
+
+use crate::{
+    coordinate::{dip_to_pixels, signed_pixels_to_dip, size_sq},
+    surface_helper::draw_2d,
+};
 
 #[implement(IDWriteFontCollectionLoader)]
 struct AppFontCollectionLoader;
@@ -294,5 +302,102 @@ impl Subsystem {
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             DirectXAlphaMode::Premultiplied,
         )
+    }
+
+    #[inline]
+    pub fn new_2d_mask_surface(
+        &self,
+        size: Size,
+    ) -> windows_core::Result<CompositionDrawingSurface> {
+        tracing::trace!("gen {}x{} mask surface", size.Width, size.Height);
+
+        self.composition_2d_graphics_device.CreateDrawingSurface(
+            size,
+            DirectXPixelFormat::A8UIntNormalized,
+            DirectXAlphaMode::Premultiplied,
+        )
+    }
+
+    pub fn gen_text_surface(
+        &self,
+        dpi: f32,
+        text: &IDWriteTextLayout,
+        color: &D2D1_COLOR_F,
+    ) -> windows_core::Result<CompositionDrawingSurface> {
+        let mut metrics = core::mem::MaybeUninit::uninit();
+        let metrics = unsafe {
+            text.GetMetrics(metrics.as_mut_ptr())?;
+            metrics.assume_init()
+        };
+
+        let surface = self.new_2d_drawing_surface(Size {
+            Width: dip_to_pixels(metrics.width, dpi),
+            Height: dip_to_pixels(metrics.height, dpi),
+        })?;
+        draw_2d(&surface, |dc, offset| {
+            unsafe {
+                dc.SetDpi(dpi, dpi);
+
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: signed_pixels_to_dip(offset.x, dpi),
+                        y: signed_pixels_to_dip(offset.y, dpi),
+                    },
+                    text,
+                    &dc.CreateSolidColorBrush(color, None)?,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })?;
+
+        Ok(surface)
+    }
+
+    pub fn rounded_rect_mask_surface(
+        &self,
+        dpi: f32,
+        round_dip: f32,
+    ) -> windows_core::Result<CompositionDrawingSurface> {
+        let surface =
+            self.new_2d_mask_surface(size_sq(dip_to_pixels(round_dip * 2.0 + 1.0, dpi)))?;
+        draw_2d(&surface, |dc, offset| {
+            unsafe {
+                dc.SetDpi(dpi, dpi);
+                dc.SetTransform(&Matrix3x2::translation(
+                    signed_pixels_to_dip(offset.x, dpi),
+                    signed_pixels_to_dip(offset.y, dpi),
+                ));
+
+                dc.Clear(None);
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: round_dip * 2.0 + 1.0,
+                            bottom: round_dip * 2.0 + 1.0,
+                        },
+                        radiusX: round_dip,
+                        radiusY: round_dip,
+                    },
+                    &dc.CreateSolidColorBrush(
+                        &D2D1_COLOR_F {
+                            a: 1.0,
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                        },
+                        None,
+                    )?,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })?;
+
+        Ok(surface)
     }
 }

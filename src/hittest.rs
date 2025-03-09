@@ -4,6 +4,13 @@ use windows::Win32::UI::WindowsAndMessaging::HCURSOR;
 
 use crate::input::EventContinueControl;
 
+pub struct PointerActionArgs {
+    pub client_x: f32,
+    pub client_y: f32,
+    pub client_width: f32,
+    pub client_height: f32,
+}
+
 pub trait HitTestTreeActionHandler {
     type Context;
 
@@ -23,10 +30,7 @@ pub trait HitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -37,10 +41,7 @@ pub trait HitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -51,8 +52,7 @@ pub trait HitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -63,8 +63,7 @@ pub trait HitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -75,10 +74,7 @@ pub trait HitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
@@ -89,10 +85,7 @@ pub trait HitTestTreeActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         ht: &mut HitTestTreeManager<Self::Context>,
-        client_x: f32,
-        client_y: f32,
-        client_width: f32,
-        client_height: f32,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         EventContinueControl::empty()
     }
