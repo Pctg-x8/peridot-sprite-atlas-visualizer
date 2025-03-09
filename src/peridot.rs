@@ -24,9 +24,13 @@ pub struct Sprite {
 pub struct SpriteAtlasAsset {
     /// needs sorted by id
     pub sprites: Vec<Sprite>,
+    pub width: u32,
+    pub height: u32,
 }
 impl SpriteAtlasAsset {
     pub fn write(&self, sink: &mut (impl Write + ?Sized)) -> std::io::Result<()> {
+        writeln!(sink, "cfg={},{}", self.width, self.height)?;
+
         for &Sprite {
             ref id,
             ref name,
@@ -55,15 +59,32 @@ impl SpriteAtlasAsset {
 
     pub fn read(src: &mut (impl BufRead + ?Sized)) -> Result<Self, SpriteAtlasAssetReadError> {
         let mut sprites = Vec::new();
+        let mut width = 32;
+        let mut height = 32;
 
         for l in src.lines() {
             let l = l?;
-            let mut spl = l.splitn(1, '=');
+            let mut spl = l.splitn(2, '=');
             let id = spl.next().unwrap();
             let params = spl
                 .next()
                 .ok_or(SpriteAtlasAssetReadError::MissingSpriteParams)?;
             let mut params = params.split(',');
+
+            if id == "cfg" {
+                width = params
+                    .next()
+                    .ok_or(SpriteAtlasAssetReadError::MissingParam("width"))?
+                    .parse()
+                    .map_err(|e| SpriteAtlasAssetReadError::InvalidParamFormat("width", e))?;
+                height = params
+                    .next()
+                    .ok_or(SpriteAtlasAssetReadError::MissingParam("height"))?
+                    .parse()
+                    .map_err(|e| SpriteAtlasAssetReadError::InvalidParamFormat("height", e))?;
+
+                continue;
+            }
 
             sprites.push(Sprite {
                 id: id
@@ -125,7 +146,11 @@ impl SpriteAtlasAsset {
             });
         }
 
-        Ok(Self { sprites })
+        Ok(Self {
+            sprites,
+            width,
+            height,
+        })
     }
 }
 

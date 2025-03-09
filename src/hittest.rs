@@ -1,10 +1,11 @@
 use std::{collections::BTreeSet, rc::Rc};
 
-use windows::Win32::UI::WindowsAndMessaging::HCURSOR;
+use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::HCURSOR};
 
 use crate::input::EventContinueControl;
 
 pub struct PointerActionArgs {
+    pub hwnd: HWND,
     pub client_x: f32,
     pub client_y: f32,
     pub client_width: f32,

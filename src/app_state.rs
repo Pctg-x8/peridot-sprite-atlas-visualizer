@@ -58,6 +58,8 @@ pub struct AppState {
     sprites_view_feedbacks: Vec<Box<dyn FnMut(&[SpriteInfo])>>,
     visible_menu: bool,
     visible_menu_view_feedbacks: Vec<Box<dyn FnMut(bool, bool)>>,
+    current_open_path: Option<PathBuf>,
+    current_open_path_view_feedbacks: Vec<Box<dyn FnMut(&Option<PathBuf>)>>,
 }
 impl AppState {
     pub fn new() -> Self {
@@ -71,6 +73,8 @@ impl AppState {
             sprites_view_feedbacks: Vec::new(),
             visible_menu: false,
             visible_menu_view_feedbacks: Vec::new(),
+            current_open_path: None,
+            current_open_path_view_feedbacks: Vec::new(),
         }
     }
 
@@ -166,6 +170,8 @@ impl AppState {
 
     pub fn save(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let mut asset = peridot::SpriteAtlasAsset {
+            width: self.atlas_size.width,
+            height: self.atlas_size.height,
             sprites: self
                 .sprites
                 .iter()
@@ -195,6 +201,49 @@ impl AppState {
         )
     }
 
+    pub fn load(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<(), peridot::SpriteAtlasAssetReadError> {
+        let asset = peridot::SpriteAtlasAsset::read(&mut std::io::BufReader::new(
+            std::fs::File::open(&path)?,
+        ))?;
+
+        self.sprites.clear();
+        self.sprites
+            .extend(asset.sprites.into_iter().map(|x| SpriteInfo {
+                id: x.id,
+                name: x.name,
+                source_path: x.source_path,
+                width: x.width,
+                height: x.height,
+                left: x.left,
+                top: x.top,
+                left_slice: x.border_left,
+                right_slice: x.border_right,
+                top_slice: x.border_top,
+                bottom_slice: x.border_bottom,
+                selected: false,
+            }));
+        self.atlas_size.width = asset.width;
+        self.atlas_size.height = asset.height;
+        self.current_open_path = Some(path.as_ref().into());
+
+        for cb in self.atlas_size_view_feedbacks.iter_mut() {
+            cb(&self.atlas_size);
+        }
+
+        for cb in self.sprites_view_feedbacks.iter_mut() {
+            cb(&self.sprites);
+        }
+
+        for cb in self.current_open_path_view_feedbacks.iter_mut() {
+            cb(&self.current_open_path);
+        }
+
+        Ok(())
+    }
+
     // TODO: unregister
     pub fn register_sprites_view_feedback(&mut self, mut fb: impl FnMut(&[SpriteInfo]) + 'static) {
         fb(&self.sprites);
@@ -214,5 +263,14 @@ impl AppState {
     ) {
         fb(self.visible_menu, true);
         self.visible_menu_view_feedbacks.push(Box::new(fb));
+    }
+
+    // TODO: unregister
+    pub fn register_current_open_path_view_feedback(
+        &mut self,
+        mut fb: impl FnMut(&Option<PathBuf>) + 'static,
+    ) {
+        fb(&self.current_open_path);
+        self.current_open_path_view_feedbacks.push(Box::new(fb));
     }
 }

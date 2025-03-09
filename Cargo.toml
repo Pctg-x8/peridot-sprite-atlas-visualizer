@@ -9,6 +9,7 @@ bitflags = "2.8.0"
 windows-core = "*"
 windows-numerics = "*"
 windows-collections = "*"
+windows-future = "*"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 tracing = "0.1"
 walkdir = "2"
@@ -47,6 +48,7 @@ features = [
     "Win32_Security",
     "System",
     "Storage",
+    "Storage_Pickers",
     "Storage_Streams",
     "Graphics_Effects",
     "Graphics_DirectX",

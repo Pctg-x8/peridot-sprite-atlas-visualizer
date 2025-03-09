@@ -1,17 +1,24 @@
 use core::mem::MaybeUninit;
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use windows::{
     Foundation::Size,
+    Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat},
     UI::Composition::{
-        CompositionEffectSourceParameter, CompositionMappingMode, ContainerVisual, SpriteVisual,
-        VisualCollection,
+        CompositionEffectSourceParameter, CompositionGraphicsDevice, CompositionMappingMode,
+        CompositionSurfaceBrush, ContainerVisual, SpriteVisual, VisualCollection,
     },
     Win32::{
-        Graphics::Direct2D::{
-            Common::{D2D_POINT_2F, D2D1_COLOR_F, D2D1_GRADIENT_STOP},
-            D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-            D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, ID2D1DeviceContext, ID2D1RenderTarget,
-            ID2D1SolidColorBrush,
+        Graphics::{
+            Direct2D::{
+                Common::{D2D_POINT_2F, D2D1_COLOR_F, D2D1_GRADIENT_STOP},
+                D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+                D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES, ID2D1DeviceContext, ID2D1RenderTarget,
+                ID2D1SolidColorBrush,
+            },
+            DirectWrite::{IDWriteFactory1, IDWriteTextFormat},
         },
         UI::WindowsAndMessaging::{HTCAPTION, HTCLIENT, HTCLOSE, HTMINBUTTON},
     },
@@ -32,7 +39,7 @@ use crate::{
         CompositionMaskBrushParams, CompositionSurfaceBrushParams, ContainerVisualParams,
         SpriteVisualParams,
     },
-    coordinate::{dip_to_pixels, size_sq},
+    coordinate::{dip_to_pixels, signed_pixels_to_dip, size_sq},
     create_instant_effect_brush,
     effect_builder::{ColorSourceEffectParams, CompositeEffectParams, GaussianBlurEffectParams},
     extra_bindings::Microsoft::Graphics::Canvas::CanvasComposite,
@@ -651,14 +658,21 @@ impl AppMenuButtonView {
 
 struct AppHeaderBaseView {
     root: ContainerVisual,
+    label: SpriteVisual,
+    label_brush: CompositionSurfaceBrush,
+    label_text_format: IDWriteTextFormat,
+    dwrite_factory: IDWriteFactory1,
+    composition_2d_graphics_device: CompositionGraphicsDevice,
     ht_root: HitTestTreeRef,
+    current_label: RefCell<String>,
     height: f32,
+    dpi: Cell<f32>,
 }
 impl AppHeaderBaseView {
-    fn new(init: &mut ViewInitContext, init_label: &str) -> Self {
+    fn new(init: &mut ViewInitContext, init_label: String) -> Self {
         let tl = init
             .subsystem
-            .new_text_layout_unrestricted(init_label, &init.subsystem.default_ui_format)
+            .new_text_layout_unrestricted(&init_label, &init.subsystem.default_ui_format)
             .unwrap();
         let mut tm = MaybeUninit::uninit();
         unsafe {
@@ -725,21 +739,20 @@ impl AppHeaderBaseView {
         .instantiate(&init.subsystem.compositor)
         .unwrap();
 
-        let label = SpriteVisualParams::new(
-            &CompositionSurfaceBrushParams::new(&label_surface)
-                .instantiate(&init.subsystem.compositor)
-                .unwrap(),
-        )
-        .size(Vector2 {
-            X: init.dip_to_pixels(tm.width),
-            Y: init.dip_to_pixels(tm.height),
-        })
-        .offset_xy(Vector2 {
-            X: init.dip_to_pixels(height + 8.0),
-            Y: init.dip_to_pixels(16.0),
-        })
-        .instantiate(&init.subsystem.compositor)
-        .unwrap();
+        let label_brush = CompositionSurfaceBrushParams::new(&label_surface)
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
+        let label = SpriteVisualParams::new(&label_brush)
+            .size(Vector2 {
+                X: init.dip_to_pixels(tm.width),
+                Y: init.dip_to_pixels(tm.height),
+            })
+            .offset_xy(Vector2 {
+                X: init.dip_to_pixels(height + 8.0),
+                Y: init.dip_to_pixels(16.0),
+            })
+            .instantiate(&init.subsystem.compositor)
+            .unwrap();
 
         let children = root.Children().unwrap();
         children.InsertAtTop(&bg).unwrap();
@@ -761,8 +774,15 @@ impl AppHeaderBaseView {
 
         Self {
             root,
+            label,
+            label_brush,
+            label_text_format: init.subsystem.default_ui_format.clone(),
+            dwrite_factory: init.subsystem.dwrite_factory.clone(),
+            composition_2d_graphics_device: init.subsystem.composition_2d_graphics_device.clone(),
             ht_root,
+            current_label: RefCell::new(init_label),
             height,
+            dpi: Cell::new(init.dpi),
         }
     }
 
@@ -778,6 +798,75 @@ impl AppHeaderBaseView {
     ) {
         children.InsertAtTop(&self.root).unwrap();
         ht.add_child(ht_parent, self.ht_root);
+    }
+
+    pub fn set_label(&self, label: String) {
+        if &label == &*self.current_label.borrow() {
+            // かわらないのでなにもしない
+            return;
+        }
+
+        let dpi = self.dpi.get();
+
+        let tl = unsafe {
+            self.dwrite_factory
+                .CreateTextLayout(
+                    &label.encode_utf16().collect::<Vec<_>>(),
+                    &self.label_text_format,
+                    f32::MAX,
+                    f32::MAX,
+                )
+                .unwrap()
+        };
+        let mut tm = MaybeUninit::uninit();
+        unsafe {
+            tl.GetMetrics(tm.as_mut_ptr()).unwrap();
+        }
+        let tm = unsafe { tm.assume_init() };
+        let label_surface = self
+            .composition_2d_graphics_device
+            .CreateDrawingSurface(
+                Size {
+                    Width: dip_to_pixels(tm.width, dpi),
+                    Height: dip_to_pixels(tm.height, dpi),
+                },
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                DirectXAlphaMode::Premultiplied,
+            )
+            .unwrap();
+        draw_2d(&label_surface, |dc, offset| {
+            unsafe {
+                dc.SetDpi(dpi, dpi);
+            }
+
+            let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F_WHITE, None)? };
+
+            unsafe {
+                dc.Clear(None);
+                dc.DrawTextLayout(
+                    D2D_POINT_2F {
+                        x: signed_pixels_to_dip(offset.x, dpi),
+                        y: signed_pixels_to_dip(offset.y, dpi),
+                    },
+                    &tl,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            Ok::<_, windows_core::Error>(())
+        })
+        .unwrap();
+
+        self.label_brush.SetSurface(&label_surface).unwrap();
+        self.label
+            .SetSize(Vector2 {
+                X: dip_to_pixels(tm.width, dpi),
+                Y: dip_to_pixels(tm.height, dpi),
+            })
+            .unwrap();
+
+        *self.current_label.borrow_mut() = label;
     }
 }
 
@@ -869,7 +958,7 @@ impl HitTestTreeActionHandler for AppHeaderHitTestActionHandler {
 }
 
 pub struct AppHeaderPresenter {
-    base_view: AppHeaderBaseView,
+    base_view: Rc<AppHeaderBaseView>,
     close_button_view: AppCloseButtonView,
     close_button_rect_rel: RectDIP,
     minimize_button_view: AppMinimizeButtonView,
@@ -877,8 +966,11 @@ pub struct AppHeaderPresenter {
     _ht_action_handler: Rc<AppHeaderHitTestActionHandler>,
 }
 impl AppHeaderPresenter {
-    pub fn new(init: &mut PresenterInitContext, init_title: &str) -> Self {
-        let base_view = AppHeaderBaseView::new(&mut init.for_view, init_title);
+    pub fn new(init: &mut PresenterInitContext) -> Self {
+        let base_view = Rc::new(AppHeaderBaseView::new(
+            &mut init.for_view,
+            "Peridot SpriteAtlas Visualizer/Editor".into(),
+        ));
         let close_button_view = AppCloseButtonView::new(&mut init.for_view);
         let minimize_button_view = AppMinimizeButtonView::new(&mut init.for_view);
         let menu_button_view = AppMenuButtonView::new(&mut init.for_view);
@@ -944,6 +1036,35 @@ impl AppHeaderPresenter {
             .get_mut(ht_action_handler.menu_button_view.ht_root)
             .action_handler = Some(Rc::downgrade(&ht_action_handler) as _);
 
+        init.app_state
+            .borrow_mut()
+            .register_current_open_path_view_feedback({
+                let base_view = Rc::downgrade(&base_view);
+
+                move |path| {
+                    let Some(base_view) = base_view.upgrade() else {
+                        // parent teardown-ed
+                        return;
+                    };
+
+                    let title = match path {
+                        Some(p) => match p.file_name() {
+                            Some(p) => format!(
+                                "Peridot SpriteAtlas Visualizer/Editor - {}",
+                                p.to_str().unwrap()
+                            ),
+                            None => {
+                                tracing::warn!("file_name() returns None; invalid file opened?");
+                                "Peridot SpriteAtlas Visualizer/Editor".into()
+                            }
+                        },
+                        None => "Peridot SpriteAtlas Visualizer/Editor".into(),
+                    };
+
+                    base_view.set_label(title);
+                }
+            });
+
         Self {
             base_view,
             close_button_view,
@@ -963,7 +1084,7 @@ impl AppHeaderPresenter {
         self.base_view.mount(children, ht, ht_parent);
     }
 
-    pub const fn height(&self) -> f32 {
+    pub fn height(&self) -> f32 {
         self.base_view.height()
     }
 

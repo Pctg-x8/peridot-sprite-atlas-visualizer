@@ -40,7 +40,12 @@ use timespan_helper::timespan_ms;
 use windows::{
     Foundation::{Size, TimeSpan},
     Graphics::Effects::IGraphicsEffect,
-    Storage::{FileAccessMode, Streams::IRandomAccessStream},
+    Storage::{
+        FileAccessMode,
+        Pickers::{FileOpenPicker, FileSavePicker},
+        StorageFile,
+        Streams::IRandomAccessStream,
+    },
     UI::{
         Color,
         Composition::{
@@ -114,7 +119,10 @@ use windows::{
         UI::{
             Controls::MARGINS,
             HiDpi::GetDpiForWindow,
-            Shell::{CLSID_DragDropHelper, DragQueryFileW, HDROP, IDropTargetHelper},
+            Shell::{
+                CLSID_DragDropHelper, DragQueryFileW, HDROP, IDropTargetHelper,
+                IInitializeWithWindow,
+            },
             WindowsAndMessaging::{
                 CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
                 GetClientRect, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HCURSOR,
@@ -131,7 +139,9 @@ use windows::{
     },
     core::{HRESULT, Interface, PCWSTR, h, s, w},
 };
+use windows_collections::{IIterable_Impl, IVector, IVector_Impl};
 use windows_core::{BOOL, HSTRING, implement};
+use windows_future::{AsyncOperationCompletedHandler, AsyncStatus};
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 mod app_state;
@@ -259,6 +269,7 @@ pub struct PresenterInitContext<'r> {
     pub for_view: ViewInitContext<'r>,
     pub dpi_handlers: &'r mut Vec<std::rc::Weak<dyn DpiHandler>>,
     pub app_state: &'r Rc<RefCell<AppState>>,
+    pub view_worker_enqueue_access: &'r ViewWorkerEnqueueWeakAccess,
 }
 pub struct ViewInitContext<'r> {
     pub subsystem: &'r Rc<Subsystem>,
@@ -3726,9 +3737,86 @@ impl AppMenuBaseView {
     }
 }
 
+#[implement(IVector<T>)]
+pub struct VectorWrapper<T>(Vec<T>)
+where
+    T: windows_core::RuntimeType + 'static;
+impl<T> IIterable_Impl<T> for VectorWrapper_Impl<T>
+where
+    T: windows_core::RuntimeType + 'static,
+{
+    fn First(&self) -> windows_core::Result<windows_collections::IIterator<T>> {
+        unimplemented!("IIterable::First")
+    }
+}
+impl<T> IVector_Impl<T> for VectorWrapper_Impl<T>
+where
+    T: windows_core::RuntimeType + 'static,
+{
+    fn Append(&self, value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
+        unimplemented!("IVector::Append");
+    }
+
+    fn Clear(&self) -> windows_core::Result<()> {
+        unimplemented!("IVector::Clear");
+    }
+
+    fn GetAt(&self, index: u32) -> windows_core::Result<T> {
+        Ok(self.0[index as usize].clone())
+    }
+
+    fn GetMany(
+        &self,
+        startIndex: u32,
+        items: &mut [<T as windows_core::Type<T>>::Default],
+    ) -> windows_core::Result<u32> {
+        unimplemented!("IVector::GetMany");
+    }
+
+    fn GetView(&self) -> windows_core::Result<windows_collections::IVectorView<T>> {
+        unimplemented!("IVector::GetView")
+    }
+
+    fn IndexOf(
+        &self,
+        value: windows_core::Ref<'_, T>,
+        index: &mut u32,
+    ) -> windows_core::Result<bool> {
+        unimplemented!("IVector::IndexOf")
+    }
+
+    fn InsertAt(&self, index: u32, value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
+        unimplemented!("IVector::InsertAt")
+    }
+
+    fn RemoveAt(&self, index: u32) -> windows_core::Result<()> {
+        unimplemented!("RemoveAt");
+    }
+
+    fn RemoveAtEnd(&self) -> windows_core::Result<()> {
+        unimplemented!("IVector::RemoveAtEnd");
+    }
+
+    fn ReplaceAll(
+        &self,
+        items: &[<T as windows_core::Type<T>>::Default],
+    ) -> windows_core::Result<()> {
+        unimplemented!("IVector::ReplaceAll")
+    }
+
+    fn SetAt(&self, index: u32, value: windows_core::Ref<'_, T>) -> windows_core::Result<()> {
+        unimplemented!("IVector::SetAt")
+    }
+
+    fn Size(&self) -> windows_core::Result<u32> {
+        Ok(self.0.len() as _)
+    }
+}
+
 struct AppMenuHitTestActionHandler {
     base: Rc<AppMenuBaseView>,
     entries: Rc<Vec<AppMenuEntryView>>,
+    view_worker_enqueue_access: ViewWorkerEnqueueWeakAccess,
 }
 impl HitTestTreeActionHandler for AppMenuHitTestActionHandler {
     type Context = AppState;
@@ -3837,10 +3925,139 @@ impl HitTestTreeActionHandler for AppMenuHitTestActionHandler {
         sender: HitTestTreeRef,
         context: &mut Self::Context,
         _ht: &mut HitTestTreeManager<Self::Context>,
-        _args: PointerActionArgs,
+        args: PointerActionArgs,
     ) -> EventContinueControl {
         if sender == self.base.ht_window_root {
             // 実ウィンドウの上だったらなにもしない
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.entries[0].ht_root {
+            let picker = FileOpenPicker::new().unwrap();
+            unsafe {
+                picker
+                    .cast::<IInitializeWithWindow>()
+                    .unwrap()
+                    .Initialize(args.hwnd)
+                    .unwrap();
+            }
+            picker.FileTypeFilter().unwrap().Append(h!(".psa")).unwrap();
+            picker
+                .PickSingleFileAsync()
+                .unwrap()
+                .SetCompleted(&AsyncOperationCompletedHandler::new({
+                    let view_worker_enqueue_access = self.view_worker_enqueue_access.clone();
+
+                    move |op, status| match status {
+                        AsyncStatus::Started => unreachable!(),
+                        AsyncStatus::Error => {
+                            panic!("async op error: {}", op.unwrap().ErrorCode().unwrap());
+                        }
+                        AsyncStatus::Canceled => {
+                            tracing::warn!("operation was cancelled");
+                            Ok(())
+                        }
+                        AsyncStatus::Completed => {
+                            let res: StorageFile = match op.unwrap().get() {
+                                Ok(x) => x,
+                                Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                                    // successfully cancelled
+                                    return Ok(());
+                                }
+                                Err(e) => panic!("async op error: {e:?}"),
+                            };
+
+                            tracing::info!("File Save: {}", res.Path().unwrap());
+
+                            let Some(vwq) = view_worker_enqueue_access.upgrade() else {
+                                // app teardown-ed
+                                return Ok(());
+                            };
+
+                            vwq.enqueue({
+                                let path = res.Path().unwrap();
+
+                                move |app_state| {
+                                    app_state.load(&path.to_os_string()).unwrap();
+                                    app_state.toggle_menu();
+                                }
+                            });
+
+                            Ok(())
+                        }
+                        _ => unreachable!(),
+                    }
+                }))
+                .unwrap();
+
+            return EventContinueControl::STOP_PROPAGATION;
+        }
+
+        if sender == self.entries[1].ht_root {
+            let picker = FileSavePicker::new().unwrap();
+            unsafe {
+                picker
+                    .cast::<IInitializeWithWindow>()
+                    .unwrap()
+                    .Initialize(args.hwnd)
+                    .unwrap();
+            }
+            picker
+                .FileTypeChoices()
+                .unwrap()
+                .Insert(
+                    h!("Peridot Sprite Atlas asset"),
+                    &IVector::from(VectorWrapper(vec![HSTRING::from(".psa")])),
+                )
+                .unwrap();
+            let complete_handler = AsyncOperationCompletedHandler::new({
+                let view_worker_enqueue_access = self.view_worker_enqueue_access.clone();
+
+                move |op, status| match status {
+                    AsyncStatus::Started => unreachable!(),
+                    AsyncStatus::Error => {
+                        panic!("async op error: {}", op.unwrap().ErrorCode().unwrap());
+                    }
+                    AsyncStatus::Canceled => {
+                        tracing::warn!("operation was cancelled");
+                        Ok(())
+                    }
+                    AsyncStatus::Completed => {
+                        let res: StorageFile = match op.unwrap().get() {
+                            Ok(x) => x,
+                            Err(e) if e.code() == windows::Win32::Foundation::S_OK => {
+                                // successfully cancelled
+                                return Ok(());
+                            }
+                            Err(e) => panic!("async op error: {e:?}"),
+                        };
+
+                        tracing::info!("File Save: {}", res.Path().unwrap());
+
+                        let Some(vwq) = view_worker_enqueue_access.upgrade() else {
+                            // app teardown-ed
+                            return Ok(());
+                        };
+
+                        vwq.enqueue({
+                            let path = res.Path().unwrap();
+
+                            move |app_state| {
+                                tracing::info!({ %path }, "File Save(ViewThread)");
+
+                                app_state.save(&path.to_os_string()).unwrap();
+                                app_state.toggle_menu();
+                            }
+                        });
+
+                        Ok(())
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            let op = picker.PickSaveFileAsync().unwrap();
+            op.SetCompleted(&complete_handler).unwrap();
+
             return EventContinueControl::STOP_PROPAGATION;
         }
 
@@ -3863,14 +4080,18 @@ impl AppMenuPresenter {
         let base = Rc::new(AppMenuBaseView::new(&mut init.for_view, top_offset));
         let mut entries = Vec::new();
         let mut max_width = 128.0f32;
-        let (e, w) = AppMenuEntryView::new(&mut init.for_view, "./resources/file_open.svg", "開く");
-        entries.push(e);
-        max_width = max_width.max(w);
-        let (e, w) = AppMenuEntryView::new(&mut init.for_view, "./resources/save.svg", "保存");
-        entries.push(e);
-        max_width = max_width.max(w);
         let (e, w) =
-            AppMenuEntryView::new(&mut init.for_view, "./resources/save_as.svg", "別名で保存");
+            AppMenuEntryView::new(&mut init.for_view, "./resources/file_open.svg", "開く...");
+        entries.push(e);
+        max_width = max_width.max(w);
+        let (e, w) = AppMenuEntryView::new(&mut init.for_view, "./resources/save.svg", "保存...");
+        entries.push(e);
+        max_width = max_width.max(w);
+        let (e, w) = AppMenuEntryView::new(
+            &mut init.for_view,
+            "./resources/save_as.svg",
+            "別名で保存...",
+        );
         entries.push(e);
         max_width = max_width.max(w);
         let (e, w) = AppMenuEntryView::new(
@@ -3883,7 +4104,7 @@ impl AppMenuPresenter {
         let (e, w) = AppMenuEntryView::new(
             &mut init.for_view,
             "./resources/resize.svg",
-            "アトラスのサイズを調整",
+            "アトラスのサイズを調整...",
         );
         entries.push(e);
         max_width = max_width.max(w);
@@ -3910,6 +4131,7 @@ impl AppMenuPresenter {
         let ht_action_handler = Rc::new(AppMenuHitTestActionHandler {
             base: base.clone(),
             entries: entries.clone(),
+            view_worker_enqueue_access: init.view_worker_enqueue_access.clone(),
         });
         init.for_view
             .ht
@@ -4408,7 +4630,7 @@ impl AppWindowPresenter {
 
         let sprite_list_pane = SpriteListPanePresenter::new(init);
 
-        let header = AppHeaderPresenter::new(init, "Peridot SpriteAtlas Visualizer/Editor");
+        let header = AppHeaderPresenter::new(init);
 
         let menu = AppMenuPresenter::new(init, header.height());
         menu.set_window_offset_by_beak_peak(
@@ -4632,6 +4854,7 @@ impl AppWindowStateModel {
         background_worker_view_update_callback: &Rc<
             RefCell<Vec<Box<dyn FnMut(&[Option<String>])>>>,
         >,
+        view_worker_enqueue_access: &ViewWorkerEnqueueWeakAccess,
     ) -> Self {
         let ht = Rc::new(RefCell::new(HitTestTreeManager::new()));
         let mut client_size_pixels = core::mem::MaybeUninit::uninit();
@@ -4669,6 +4892,7 @@ impl AppWindowStateModel {
                 },
                 dpi_handlers: &mut dpi_handlers,
                 app_state,
+                view_worker_enqueue_access,
             },
             &client_size_pixels,
         );
@@ -4759,8 +4983,9 @@ impl AppWindowStateModel {
         );
     }
 
-    pub fn on_mouse_move(&mut self, x_pixels: i16, y_pixels: i16) {
+    pub fn on_mouse_move(&mut self, hwnd: HWND, x_pixels: i16, y_pixels: i16) {
         self.pointer_input_manager.on_mouse_move(
+            hwnd,
             &mut self.ht.borrow_mut(),
             &mut self.app_state.borrow_mut(),
             self.root_presenter.ht_root,
@@ -5005,6 +5230,77 @@ impl LockedGlobal {
     }
 }
 
+type ViewWork = Box<dyn FnOnce(&mut AppState) + Send>;
+
+#[derive(Clone)]
+pub struct ViewWorkerEnqueueWeakAccess {
+    sender: std::sync::mpsc::Sender<ViewWork>,
+    event: std::sync::Weak<NativeEvent>,
+}
+impl ViewWorkerEnqueueWeakAccess {
+    pub fn upgrade(&self) -> Option<ViewWorkerEnqueueAccess> {
+        self.event.upgrade().map(|e| ViewWorkerEnqueueAccess {
+            sender: self.sender.clone(),
+            event: e,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct ViewWorkerEnqueueAccess {
+    sender: std::sync::mpsc::Sender<ViewWork>,
+    event: Arc<NativeEvent>,
+}
+impl ViewWorkerEnqueueAccess {
+    pub fn enqueue(&self, work: impl FnOnce(&mut AppState) + Send + 'static) {
+        if let Err(e) = self.sender.send(Box::new(work)) {
+            tracing::warn!({?e}, "sending ViewWork failed");
+            return;
+        }
+
+        self.event.signal();
+    }
+}
+
+pub struct ViewWorkerQueue {
+    sender: std::sync::mpsc::Sender<ViewWork>,
+    receiver: std::sync::mpsc::Receiver<ViewWork>,
+    event: Arc<NativeEvent>,
+}
+impl ViewWorkerQueue {
+    pub fn new() -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        Self {
+            sender,
+            receiver,
+            event: Arc::new(NativeEvent::new(true, None).unwrap()),
+        }
+    }
+
+    pub fn enqueue_weak_access(&self) -> ViewWorkerEnqueueWeakAccess {
+        ViewWorkerEnqueueWeakAccess {
+            sender: self.sender.clone(),
+            event: Arc::downgrade(&self.event),
+        }
+    }
+
+    pub fn accept_work(&self) {
+        self.event.reset();
+    }
+
+    pub fn try_dequeue(&self) -> Option<ViewWork> {
+        match self.receiver.try_recv() {
+            Ok(x) => Some(x),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                tracing::warn!("dequeue work failed: channel disconnected?");
+                None
+            }
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt().pretty().init();
     unsafe {
@@ -5078,6 +5374,7 @@ fn main() {
         .expect("Failed to set dark mode preference");
     }
 
+    let view_worker_queue = ViewWorkerQueue::new();
     let mut bg_worker_vf = vec![None; background_worker.worker_count()];
     let bg_worker_vf_update_callback =
         Rc::new(RefCell::new(Vec::<Box<dyn FnMut(&[Option<String>])>>::new()));
@@ -5089,6 +5386,7 @@ fn main() {
         &app_state,
         &background_worker,
         &bg_worker_vf_update_callback,
+        &view_worker_queue.enqueue_weak_access(),
     );
     unsafe {
         RegisterDragDrop(
@@ -5159,7 +5457,10 @@ fn main() {
     'app: loop {
         let r = unsafe {
             MsgWaitForMultipleObjects(
-                Some(&[ui_thread_wakeup_event.handle()]),
+                Some(&[
+                    ui_thread_wakeup_event.handle(),
+                    view_worker_queue.event.handle(),
+                ]),
                 false,
                 INFINITE,
                 QS_ALLINPUT,
@@ -5191,6 +5492,14 @@ fn main() {
             continue;
         }
         if r.0 == WAIT_OBJECT_0.0 + 1 {
+            while let Some(w) = view_worker_queue.try_dequeue() {
+                w(&mut app_state.borrow_mut());
+            }
+
+            view_worker_queue.accept_work();
+            continue;
+        }
+        if r.0 == WAIT_OBJECT_0.0 + 2 {
             while unsafe { PeekMessageW(msg.as_mut_ptr(), None, 0, 0, PM_REMOVE).as_bool() } {
                 if unsafe { msg.assume_init_ref().message == WM_QUIT } {
                     break 'app;
@@ -5330,6 +5639,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         };
 
         state.on_mouse_move(
+            hwnd,
             (lparam.0 & 0xffff) as i16,
             ((lparam.0 >> 16) & 0xffff) as i16,
         );

@@ -47,6 +47,7 @@ impl PointerInputManager {
 
     pub fn on_mouse_move<ActionContext>(
         &mut self,
+        hwnd: HWND,
         ht: &mut HitTestTreeManager<ActionContext>,
         action_context: &mut ActionContext,
         ht_root: HitTestTreeRef,
@@ -78,6 +79,7 @@ impl PointerInputManager {
                         action_context,
                         ht,
                         PointerActionArgs {
+                            hwnd,
                             client_x,
                             client_y,
                             client_width: client_size.Width,
@@ -113,6 +115,7 @@ impl PointerInputManager {
                             action_context,
                             ht,
                             PointerActionArgs {
+                                hwnd,
                                 client_x,
                                 client_y,
                                 client_width: client_size.Width,
@@ -139,6 +142,7 @@ impl PointerInputManager {
                                 action_context,
                                 ht,
                                 PointerActionArgs {
+                                    hwnd,
                                     client_x,
                                     client_y,
                                     client_width: client_size.Width,
@@ -172,6 +176,7 @@ impl PointerInputManager {
                     action_context,
                     ht,
                     PointerActionArgs {
+                        hwnd,
                         client_x,
                         client_y,
                         client_width: client_size.Width,
@@ -180,7 +185,15 @@ impl PointerInputManager {
                 )
             });
             if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
-                self.on_mouse_move(ht, action_context, ht_root, client_size, client_x, client_y);
+                self.on_mouse_move(
+                    hwnd,
+                    ht,
+                    action_context,
+                    ht_root,
+                    client_size,
+                    client_x,
+                    client_y,
+                );
             }
             if flags.contains(EventContinueControl::STOP_PROPAGATION) {
                 break;
@@ -216,6 +229,7 @@ impl PointerInputManager {
                                 action_context,
                                 ht,
                                 PointerActionArgs {
+                                    hwnd,
                                     client_x,
                                     client_y,
                                     client_width: client_size.Width,
@@ -225,6 +239,7 @@ impl PointerInputManager {
                         });
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                     self.on_mouse_move(
+                        hwnd,
                         ht,
                         action_context,
                         ht_root,
@@ -239,6 +254,7 @@ impl PointerInputManager {
                     }
                     self.pointer_focus = PointerFocusState::Entering(tr);
                     self.on_mouse_move(
+                        hwnd,
                         ht,
                         action_context,
                         ht_root,
@@ -261,6 +277,7 @@ impl PointerInputManager {
                             action_context,
                             ht,
                             PointerActionArgs {
+                                hwnd,
                                 client_x,
                                 client_y,
                                 client_width: client_size.Width,
@@ -270,6 +287,7 @@ impl PointerInputManager {
                     });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                         self.on_mouse_move(
+                            hwnd,
                             ht,
                             action_context,
                             ht_root,
@@ -305,7 +323,15 @@ impl PointerInputManager {
         client_x: f32,
         client_y: f32,
     ) {
-        self.on_mouse_move(ht, action_context, ht_root, client_size, client_x, client_y);
+        self.on_mouse_move(
+            hwnd,
+            ht,
+            action_context,
+            ht_root,
+            client_size,
+            client_x,
+            client_y,
+        );
 
         match self.pointer_focus {
             PointerFocusState::Capturing(tr) => {
@@ -318,6 +344,7 @@ impl PointerInputManager {
                                 action_context,
                                 ht,
                                 PointerActionArgs {
+                                    hwnd,
                                     client_x,
                                     client_y,
                                     client_width: client_size.Width,
@@ -327,6 +354,7 @@ impl PointerInputManager {
                         });
                 if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                     self.on_mouse_move(
+                        hwnd,
                         ht,
                         action_context,
                         ht_root,
@@ -341,6 +369,7 @@ impl PointerInputManager {
                     }
                     self.pointer_focus = PointerFocusState::Entering(tr);
                     self.on_mouse_move(
+                        hwnd,
                         ht,
                         action_context,
                         ht_root,
@@ -363,6 +392,7 @@ impl PointerInputManager {
                             action_context,
                             ht,
                             PointerActionArgs {
+                                hwnd,
                                 client_x,
                                 client_y,
                                 client_width: client_size.Width,
@@ -372,6 +402,7 @@ impl PointerInputManager {
                     });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                         self.on_mouse_move(
+                            hwnd,
                             ht,
                             action_context,
                             ht_root,
@@ -408,6 +439,7 @@ impl PointerInputManager {
                                     action_context,
                                     ht,
                                     PointerActionArgs {
+                                        hwnd,
                                         client_x,
                                         client_y,
                                         client_width: client_size.Width,
@@ -417,6 +449,7 @@ impl PointerInputManager {
                             });
                     if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                         self.on_mouse_move(
+                            hwnd,
                             ht,
                             action_context,
                             ht_root,
@@ -431,6 +464,7 @@ impl PointerInputManager {
                         }
                         self.pointer_focus = PointerFocusState::Entering(tr);
                         self.on_mouse_move(
+                            hwnd,
                             ht,
                             action_context,
                             ht_root,
@@ -453,6 +487,7 @@ impl PointerInputManager {
                                 action_context,
                                 ht,
                                 PointerActionArgs {
+                                    hwnd,
                                     client_x,
                                     client_y,
                                     client_width: client_size.Width,
@@ -462,6 +497,7 @@ impl PointerInputManager {
                         });
                         if flags.contains(EventContinueControl::RECOMPUTE_POINTER_ENTER) {
                             self.on_mouse_move(
+                                hwnd,
                                 ht,
                                 action_context,
                                 ht_root,
